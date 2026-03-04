@@ -12,6 +12,9 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+PLUGIN_HOST_USER="${PLUGIN_HOST_USER:-$(id -un)}"
+PLUGIN_HOME="${PLUGIN_HOME:-/home/${PLUGIN_HOST_USER}}"
+
 SRC_DIR="${REPO_ROOT}/${PLUGIN_ID}"
 SRC_INDEX="${SRC_DIR}/index.ts"
 SRC_MANIFEST="${SRC_DIR}/openclaw.plugin.json"
@@ -27,7 +30,7 @@ DEST_INDEX="${DEST_DIR}/index.ts"
 DEST_MANIFEST="${DEST_DIR}/openclaw.plugin.json"
 
 # Read-only signal so operators can catch missing config while avoiding ACL churn.
-OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/home/forge/.openclaw/openclaw.json}"
+OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${PLUGIN_HOME}/.openclaw/openclaw.json}"
 
 DO_PREVIEW=0
 DO_APPLY=0
