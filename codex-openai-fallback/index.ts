@@ -204,6 +204,13 @@ function arm(state: CircuitState, seconds: number): void {
   state.lastThrottleReason = `manual-arm:${safeSeconds}s`;
 }
 
+function remainingSeconds(state: CircuitState, now = Date.now()): number {
+  if (state.untilMs <= now) {
+    return 0;
+  }
+  return Math.ceil((state.untilMs - now) / 1000);
+}
+
 const fallbackPlugin = {
   id: "codex-openai-fallback",
   name: "Codex/OpenAI Fallback",
@@ -224,11 +231,18 @@ const fallbackPlugin = {
     api.registerGatewayMethod("codex-fallback.arm", ({ params, respond }: any) => {
       const secondsRaw = params && typeof params.seconds === "number" ? params.seconds : 60;
       arm(state, secondsRaw);
+      api.logger.warn(
+        `codex-openai-fallback: fallback entered (source=manual-arm, until_ms=${state.untilMs}, remaining_s=${remainingSeconds(state)})`
+      );
       respond(true, buildStatus(cfg, state));
     });
 
     api.registerGatewayMethod("codex-fallback.disarm", ({ respond }: any) => {
+      const wasActive = state.untilMs > Date.now();
       state.untilMs = 0;
+      if (wasActive) {
+        api.logger.info("codex-openai-fallback: fallback exited (source=manual-disarm)");
+      }
       respond(true, buildStatus(cfg, state));
     });
 
@@ -264,6 +278,9 @@ const fallbackPlugin = {
         .action((opts: { seconds?: string }) => {
           const seconds = Number.parseInt(opts.seconds ?? "60", 10) || 60;
           arm(state, seconds);
+          api.logger.warn(
+            `codex-openai-fallback: fallback entered (source=cli-arm, until_ms=${state.untilMs}, remaining_s=${remainingSeconds(state)})`
+          );
           console.log(`armed for ${Math.max(15, Math.min(3600, seconds))}s`);
         });
 
@@ -271,7 +288,11 @@ const fallbackPlugin = {
         .command("disarm")
         .description("Disable fallback mode immediately")
         .action(() => {
+          const wasActive = state.untilMs > Date.now();
           state.untilMs = 0;
+          if (wasActive) {
+            api.logger.info("codex-openai-fallback: fallback exited (source=cli-disarm)");
+          }
           console.log("disarmed");
         });
     });
@@ -287,6 +308,12 @@ const fallbackPlugin = {
       }
 
       const now = Date.now();
+      if (state.untilMs > 0 && state.untilMs <= now) {
+        api.logger.info(
+          `codex-openai-fallback: fallback exited (source=cooldown-expired, last_reason=${state.lastThrottleReason || "n/a"})`
+        );
+        state.untilMs = 0;
+      }
       if (state.untilMs <= now) {
         return;
       }
@@ -295,7 +322,7 @@ const fallbackPlugin = {
       state.lastAppliedAtMs = now;
 
       api.logger.info(
-        `codex-openai-fallback: using ${cfg.fallbackProvider}/${cfg.fallbackModel} (cooldown ${(state.untilMs - now) / 1000}s)`
+        `codex-openai-fallback: fallback request routed (provider=${cfg.fallbackProvider}, model=${cfg.fallbackModel}, remaining_s=${remainingSeconds(state, now)})`
       );
 
       return {
@@ -316,13 +343,21 @@ const fallbackPlugin = {
       }
 
       const now = Date.now();
+      const wasActive = state.untilMs > now;
+      const previousUntilMs = state.untilMs;
       state.untilMs = now + cfg.cooldownMs;
       state.lastThrottleAtMs = now;
       state.lastThrottleReason = typeof event.error === "string" ? event.error : "rate-limit";
-
-      api.logger.warn(
-        `codex-openai-fallback: throttling detected, fallback active for ${Math.floor(cfg.cooldownMs / 1000)}s`
-      );
+      const previousRemainingSeconds = previousUntilMs > now ? Math.ceil((previousUntilMs - now) / 1000) : 0;
+      if (wasActive) {
+        api.logger.warn(
+          `codex-openai-fallback: fallback window refreshed (source=throttle, previous_remaining_s=${previousRemainingSeconds}, new_remaining_s=${remainingSeconds(state, now)})`
+        );
+      } else {
+        api.logger.warn(
+          `codex-openai-fallback: fallback entered (source=throttle, remaining_s=${remainingSeconds(state, now)})`
+        );
+      }
     });
 
     api.logger.info(

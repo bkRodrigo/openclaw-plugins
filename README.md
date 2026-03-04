@@ -37,9 +37,13 @@ Set host/runtime values in `.env` (for example `PLUGIN_HOST_USER`, `RUNTIME_USER
 ## Repository Layout
 
 - `codex-openai-fallback/` - plugin source
-- `scripts/` - deployment/test scripts
+- `scripts/` - deployment/test/status scripts
 - `docs/` - plugin-specific docs
 - `.env.example` - portable env template for scripts
+
+## CI
+
+- GitHub Actions workflow `.github/workflows/shell-syntax.yml` runs `bash -n` for all `scripts/*.sh` on push and PR.
 
 ## Plugin TOC
 
