@@ -1,0 +1,25 @@
+name: Shell Syntax
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  bash-n:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate script syntax
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          scripts=(scripts/*.sh)
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "No shell scripts found under scripts/"
+            exit 0
+          fi
+          bash -n "${scripts[@]}"

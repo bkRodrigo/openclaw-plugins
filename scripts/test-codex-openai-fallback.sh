@@ -80,7 +80,7 @@ log() {
 extract_json() {
   local raw="$1"
   local json
-  json="$(printf '%s\n' "$raw" | awk 'BEGIN{capture=0} /^[[:space:]]*[{[]/ {capture=1} capture {print}')"
+  json="$(printf '%s\n' "$raw" | awk 'BEGIN{capture=0} /^[[:space:]]*[{]/ {capture=1} capture {print}')"
   [[ -n "$json" ]] || return 1
   printf '%s\n' "$json" | jq -e . >/dev/null 2>&1 || return 1
   printf '%s\n' "$json"

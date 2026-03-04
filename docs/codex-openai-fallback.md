@@ -63,6 +63,26 @@ Without `.env`:
   --json
 ```
 
+## Fallback Mode Status Helper
+
+One-shot check:
+
+```bash
+/home/${PLUGIN_HOST_USER}/plugins/scripts/check-codex-fallback-mode.sh
+```
+
+Watch mode (poll every 5 seconds):
+
+```bash
+/home/${PLUGIN_HOST_USER}/plugins/scripts/check-codex-fallback-mode.sh --watch 5
+```
+
+Raw JSON:
+
+```bash
+/home/${PLUGIN_HOST_USER}/plugins/scripts/check-codex-fallback-mode.sh --json
+```
+
 ## Script Configuration
 
 All script defaults are configurable via `.env` (template: `.env.example`), including:
@@ -71,4 +91,13 @@ All script defaults are configurable via `.env` (template: `.env.example`), incl
 - runtime user/home/path (`RUNTIME_USER`, `RUNTIME_HOME`, `RUNTIME_PATH`)
 - OpenClaw paths (`OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, `OPENCLAW_WORKSPACE`)
 - deployment target paths (`OPENCLAW_ROOT`, `OPENCLAW_CONFIG`)
-- test controls (`ARM_SECONDS`, `COMMAND_TIMEOUT_SECONDS`, `EXPECTED_FALLBACK`, `EXPECTED_PRIMARY`)
+- test/status controls (`ARM_SECONDS`, `COMMAND_TIMEOUT_SECONDS`, `EXPECTED_FALLBACK`, `EXPECTED_PRIMARY`, `FALLBACK_STATUS_WATCH_SECONDS`)
+
+## Observability Markers
+
+Plugin logs include explicit fallback transition markers:
+
+- fallback entered (`source=manual-arm`, `source=cli-arm`, or `source=throttle`)
+- fallback window refreshed (`source=throttle`)
+- fallback request routed (provider/model + remaining seconds)
+- fallback exited (`source=manual-disarm`, `source=cli-disarm`, `source=cooldown-expired`)
