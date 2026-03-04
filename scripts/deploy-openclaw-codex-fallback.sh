@@ -4,6 +4,14 @@ set -euo pipefail
 PLUGIN_ID="codex-openai-fallback"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${OPENCLAW_PLUGIN_ENV_FILE:-${REPO_ROOT}/.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
 SRC_DIR="${REPO_ROOT}/${PLUGIN_ID}"
 SRC_INDEX="${SRC_DIR}/index.ts"
 SRC_MANIFEST="${SRC_DIR}/openclaw.plugin.json"
@@ -35,6 +43,9 @@ Options:
   --preview   Show source/destination state and checksums.
   --apply     Copy plugin files into installed OpenClaw extensions path.
   --restart   Restart openclaw-gateway.service after apply.
+
+Notes:
+  - If present, ${REPO_ROOT}/.env is sourced first (override with OPENCLAW_PLUGIN_ENV_FILE).
 USAGE
 }
 
