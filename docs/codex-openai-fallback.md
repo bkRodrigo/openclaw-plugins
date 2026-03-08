@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Provide a fallback path from a primary Codex provider/model to an OpenAI API provider/model during throttle or manual fallback windows.
+Provide a fallback path from a primary Codex provider/model to an OpenAI API provider/model during throttle windows, targeted `openai-codex` auth-refresh outages, or manual fallback windows.
 
 ## Plugin ID
 
@@ -18,12 +18,17 @@ Provide a fallback path from a primary Codex provider/model to an OpenAI API pro
 ## Runtime Behavior
 
 - Watches for rate-limit/throttle style failures.
-- Activates fallback window (`cooldownSeconds`) after qualifying failures.
+- Watches for targeted `openai-codex` OAuth refresh/auth failures.
+- Activates fallback window (`cooldownSeconds`) after qualifying throttle failures.
+- Pins fallback automatically for qualifying auth-refresh outages.
+- Supports pinned fallback state for operator-controlled outage windows.
 - Overrides provider/model while fallback window is active.
 - Exposes control/status methods:
   - `codex-fallback.status`
   - `codex-fallback.arm`
   - `codex-fallback.disarm`
+  - `codex-fallback.pin`
+  - `codex-fallback.release`
 
 ## Default Routing Model
 
@@ -63,6 +68,8 @@ Without `.env`:
   --json
 ```
 
+The deterministic drill now uses `scripts/openclaw-gateway-rpc.mjs` for plugin control/status calls instead of `openclaw gateway call ...`, because the CLI wrapper can hang under the runtime-user path even when the lower-level gateway transport is healthy.
+
 ## Fallback Mode Status Helper
 
 One-shot check:
@@ -83,21 +90,50 @@ Raw JSON:
 /home/${PLUGIN_HOST_USER}/plugins/scripts/check-codex-fallback-mode.sh --json
 ```
 
+Pinned and auth-outage status fields:
+
+- `pinned`
+- `pinReason`
+- `pinSource`
+- `authOutagePinEnabled`
+- `lastAuthOutageAtMs`
+- `lastAuthOutageError`
+
+Pinned fallback remains active even after a timed cooldown expires and must be released explicitly.
+
 ## Script Configuration
 
 All script defaults are configurable via `.env` (template: `.env.example`), including:
 
 - host user/home (`PLUGIN_HOST_USER`, `PLUGIN_HOME`)
+- OpenClaw binary/package root (`OPENCLAW_BIN`, `OPENCLAW_PACKAGE_ROOT`)
 - runtime user/home/path (`RUNTIME_USER`, `RUNTIME_HOME`, `RUNTIME_PATH`)
 - OpenClaw paths (`OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH`, `OPENCLAW_WORKSPACE`)
 - deployment target paths (`OPENCLAW_ROOT`, `OPENCLAW_CONFIG`)
 - test/status controls (`ARM_SECONDS`, `COMMAND_TIMEOUT_SECONDS`, `EXPECTED_FALLBACK`, `EXPECTED_PRIMARY`, `FALLBACK_STATUS_WATCH_SECONDS`)
+
+## Local Regression Tests
+
+```bash
+/home/${PLUGIN_HOST_USER}/plugins/tests/run.sh
+```
+
+Coverage includes:
+
+- core fallback state semantics for cooldown vs pin behavior
+- auth-outage detection and auto-pin behavior for targeted `openai-codex` refresh failures
+- lower-level gateway RPC helper resolution and invocation
+- deterministic drill/status helpers using the gateway helper instead of `openclaw gateway call`
+- explicit regression guard that fails if the shell scripts fall back to the broken CLI wrapper path
 
 ## Observability Markers
 
 Plugin logs include explicit fallback transition markers:
 
 - fallback entered (`source=manual-arm`, `source=cli-arm`, or `source=throttle`)
+- fallback pinned (`source=<pin-source>`)
+- auth outage detected and fallback pinned (`source=auth-refresh`, `reason=auth-outage`)
 - fallback window refreshed (`source=throttle`)
 - fallback request routed (provider/model + remaining seconds)
 - fallback exited (`source=manual-disarm`, `source=cli-disarm`, `source=cooldown-expired`)
+- fallback pin released

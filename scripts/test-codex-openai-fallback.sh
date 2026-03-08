@@ -12,6 +12,8 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+OPENCLAW_PACKAGE_ROOT="${OPENCLAW_PACKAGE_ROOT:-}"
+GATEWAY_CALL_HELPER="${OPENCLAW_GATEWAY_CALL_HELPER:-${SCRIPT_DIR}/openclaw-gateway-rpc.mjs}"
 PLUGIN_PREFIX="codex-fallback"
 
 PLUGIN_HOST_USER="${PLUGIN_HOST_USER:-$(id -un)}"
@@ -47,14 +49,14 @@ Deterministic fallback drill:
   6) run post turn and verify return to primary provider/model
 
 Options:
-  --runtime-user <user>     Run OpenClaw commands via sudo -u <user>
+  --runtime-user <user>     Run runtime commands via sudo -u <user>
   --runtime-home <path>     HOME for runtime user (default: /home/<runtime-user>)
   --runtime-path <path>     PATH for runtime commands (default: current PATH)
   --state-dir <path>        OPENCLAW_STATE_DIR for runtime commands
   --config-path <path>      OPENCLAW_CONFIG_PATH for runtime commands
   --workspace <path>        OPENCLAW_WORKSPACE for runtime commands
   --arm-seconds <n>         Arm duration in seconds (default: 120)
-  --cmd-timeout <n>         Timeout per OpenClaw command in seconds (default: 120)
+  --cmd-timeout <n>         Timeout per command in seconds (default: 120)
   --expect-primary <p/m>    Expected post-recovery provider/model (optional)
   --expect-fallback <p/m>   Expected fallback provider/model (optional)
   --skip-post-check         Skip post-disarm primary verification turn
@@ -86,34 +88,33 @@ extract_json() {
   printf '%s\n' "$json"
 }
 
-build_exec_cmd() {
-  local -a base_cmd
-  local -a exec_cmd
-
-  base_cmd=("$OPENCLAW_BIN" "--log-level" "error" "--no-color" "$@")
+build_timed_cmd() {
+  local -a cmd
+  cmd=("$@")
 
   if [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( COMMAND_TIMEOUT_SECONDS > 0 )) && command -v timeout >/dev/null 2>&1; then
-    exec_cmd=(timeout --foreground "${COMMAND_TIMEOUT_SECONDS}" "${base_cmd[@]}")
+    printf '%s\n' timeout --foreground "${COMMAND_TIMEOUT_SECONDS}" "${cmd[@]}"
   else
-    exec_cmd=("${base_cmd[@]}")
+    printf '%s\n' "${cmd[@]}"
   fi
-
-  printf '%s\n' "${exec_cmd[@]}"
 }
 
-run_openclaw() {
+run_runtime_cmd() {
+  local -a cmd
   local -a exec_cmd
   local -a env_args
-  mapfile -t exec_cmd < <(build_exec_cmd "$@")
+
+  cmd=("$@")
+  mapfile -t exec_cmd < <(build_timed_cmd "${cmd[@]}")
+
+  env_args=()
+  [[ -n "$RUNTIME_HOME" ]] && env_args+=("HOME=$RUNTIME_HOME")
+  [[ -n "$RUNTIME_PATH" ]] && env_args+=("PATH=$RUNTIME_PATH")
+  [[ -n "$STATE_DIR" ]] && env_args+=("OPENCLAW_STATE_DIR=$STATE_DIR")
+  [[ -n "$CONFIG_PATH" ]] && env_args+=("OPENCLAW_CONFIG_PATH=$CONFIG_PATH")
+  [[ -n "$WORKSPACE_DIR" ]] && env_args+=("OPENCLAW_WORKSPACE=$WORKSPACE_DIR")
 
   if [[ -n "$RUNTIME_USER" && "$(id -un)" != "$RUNTIME_USER" ]]; then
-    env_args=()
-    [[ -n "$RUNTIME_HOME" ]] && env_args+=("HOME=$RUNTIME_HOME")
-    [[ -n "$RUNTIME_PATH" ]] && env_args+=("PATH=$RUNTIME_PATH")
-    [[ -n "$STATE_DIR" ]] && env_args+=("OPENCLAW_STATE_DIR=$STATE_DIR")
-    [[ -n "$CONFIG_PATH" ]] && env_args+=("OPENCLAW_CONFIG_PATH=$CONFIG_PATH")
-    [[ -n "$WORKSPACE_DIR" ]] && env_args+=("OPENCLAW_WORKSPACE=$WORKSPACE_DIR")
-
     if [[ "${#env_args[@]}" -gt 0 ]]; then
       sudo -n -u "$RUNTIME_USER" /usr/bin/env "${env_args[@]}" "${exec_cmd[@]}"
     else
@@ -122,12 +123,6 @@ run_openclaw() {
     return
   fi
 
-  env_args=()
-  [[ -n "$RUNTIME_PATH" ]] && env_args+=("PATH=$RUNTIME_PATH")
-  [[ -n "$STATE_DIR" ]] && env_args+=("OPENCLAW_STATE_DIR=$STATE_DIR")
-  [[ -n "$CONFIG_PATH" ]] && env_args+=("OPENCLAW_CONFIG_PATH=$CONFIG_PATH")
-  [[ -n "$WORKSPACE_DIR" ]] && env_args+=("OPENCLAW_WORKSPACE=$WORKSPACE_DIR")
-
   if [[ "${#env_args[@]}" -gt 0 ]]; then
     /usr/bin/env "${env_args[@]}" "${exec_cmd[@]}"
   else
@@ -135,21 +130,28 @@ run_openclaw() {
   fi
 }
 
+run_openclaw() {
+  run_runtime_cmd "$OPENCLAW_BIN" --log-level error --no-color "$@"
+}
+
 run_gateway_call() {
   local method="$1"
   local params="$2"
+  local -a helper_cmd
   local raw
-  local json
 
-  if ! raw="$(run_openclaw gateway call "$method" --params "$params" --json 2>&1)"; then
+  helper_cmd=("$GATEWAY_CALL_HELPER" --openclaw-bin "$OPENCLAW_BIN" --method "$method" --params "$params")
+  [[ -n "$OPENCLAW_PACKAGE_ROOT" ]] && helper_cmd+=(--openclaw-package-root "$OPENCLAW_PACKAGE_ROOT")
+  if [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( COMMAND_TIMEOUT_SECONDS > 0 )); then
+    helper_cmd+=(--timeout-ms "$(( COMMAND_TIMEOUT_SECONDS * 1000 ))")
+  fi
+
+  if ! raw="$(run_runtime_cmd "${helper_cmd[@]}" 2>&1)"; then
     fail "gateway call failed for $method: $raw"
   fi
 
-  if ! json="$(extract_json "$raw")"; then
-    fail "non-JSON response for $method: $raw"
-  fi
-
-  printf '%s\n' "$json"
+  printf '%s\n' "$raw" | jq -e . >/dev/null 2>&1 || fail "non-JSON response for $method: $raw"
+  printf '%s\n' "$raw"
 }
 
 run_agent_turn() {
@@ -250,6 +252,7 @@ if [[ "$OPENCLAW_BIN" != /* ]]; then
   OPENCLAW_BIN="$OPENCLAW_BIN_RESOLVED"
 fi
 [[ -x "$OPENCLAW_BIN" ]] || fail "openclaw binary is not executable: $OPENCLAW_BIN"
+[[ -x "$GATEWAY_CALL_HELPER" ]] || fail "gateway helper is not executable: $GATEWAY_CALL_HELPER"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 
 if [[ -n "$RUNTIME_USER" && -z "$RUNTIME_HOME" ]]; then
@@ -270,12 +273,12 @@ if (( COMMAND_TIMEOUT_SECONDS < 0 )); then
   fail "--cmd-timeout must be >= 0"
 fi
 
-health_json="$(run_gateway_call "health" "{}")"
+health_json="$(run_gateway_call health '{}')"
 if ! printf '%s\n' "$health_json" | jq -e '.ok == true' >/dev/null; then
   fail "gateway health is not ok"
 fi
 
-status_before="$(run_gateway_call "${PLUGIN_PREFIX}.status" "{}")"
+status_before="$(run_gateway_call "${PLUGIN_PREFIX}.status" '{}')"
 plugin_enabled="$(printf '%s\n' "$status_before" | jq -r '.enabled')"
 [[ "$plugin_enabled" == "true" ]] || fail "plugin is not enabled"
 
@@ -295,7 +298,7 @@ if [[ -n "$EXPECTED_FALLBACK" ]]; then
 fi
 
 run_gateway_call "${PLUGIN_PREFIX}.arm" "{\"seconds\":${ARM_SECONDS}}" >/dev/null
-status_armed="$(run_gateway_call "${PLUGIN_PREFIX}.status" "{}")"
+status_armed="$(run_gateway_call "${PLUGIN_PREFIX}.status" '{}')"
 armed_active="$(printf '%s\n' "$status_armed" | jq -r '.active')"
 [[ "$armed_active" == "true" ]] || fail "fallback did not arm"
 
@@ -311,7 +314,7 @@ if [[ "$turn_fallback_model" != "$fallback_model" ]]; then
   fail "fallback model not applied: expected $fallback_model got $turn_fallback_model"
 fi
 
-status_after_fallback="$(run_gateway_call "${PLUGIN_PREFIX}.status" "{}")"
+status_after_fallback="$(run_gateway_call "${PLUGIN_PREFIX}.status" '{}')"
 applied_after="$(printf '%s\n' "$status_after_fallback" | jq -r '.appliedCount // 0')"
 if (( applied_after <= applied_before )); then
   fail "appliedCount did not increase (before=$applied_before after=$applied_after)"
@@ -321,8 +324,8 @@ post_turn_provider=""
 post_turn_model=""
 
 if [[ "$KEEP_ARMED" -eq 0 ]]; then
-  run_gateway_call "${PLUGIN_PREFIX}.disarm" "{}" >/dev/null
-  disarmed_status="$(run_gateway_call "${PLUGIN_PREFIX}.status" "{}")"
+  run_gateway_call "${PLUGIN_PREFIX}.disarm" '{}' >/dev/null
+  disarmed_status="$(run_gateway_call "${PLUGIN_PREFIX}.status" '{}')"
   disarmed_active="$(printf '%s\n' "$disarmed_status" | jq -r '.active')"
   [[ "$disarmed_active" == "false" ]] || fail "fallback remained active after disarm"
 

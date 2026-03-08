@@ -12,6 +12,8 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+OPENCLAW_PACKAGE_ROOT="${OPENCLAW_PACKAGE_ROOT:-}"
+GATEWAY_CALL_HELPER="${OPENCLAW_GATEWAY_CALL_HELPER:-${SCRIPT_DIR}/openclaw-gateway-rpc.mjs}"
 
 PLUGIN_HOST_USER="${PLUGIN_HOST_USER:-$(id -un)}"
 PLUGIN_HOME="${PLUGIN_HOME:-/home/${PLUGIN_HOST_USER}}"
@@ -40,13 +42,13 @@ Default output:
   FALLBACK ...
 
 Options:
-  --runtime-user <user>     Run OpenClaw commands via sudo -u <user>
+  --runtime-user <user>     Run runtime commands via sudo -u <user>
   --runtime-home <path>     HOME for runtime user (default: /home/<runtime-user>)
   --runtime-path <path>     PATH for runtime commands (default: current PATH)
   --state-dir <path>        OPENCLAW_STATE_DIR for runtime commands
   --config-path <path>      OPENCLAW_CONFIG_PATH for runtime commands
   --workspace <path>        OPENCLAW_WORKSPACE for runtime commands
-  --cmd-timeout <n>         Timeout per OpenClaw command in seconds (default: 120)
+  --cmd-timeout <n>         Timeout per command in seconds (default: 120)
   --watch <n>               Poll every <n> seconds (0 for one-shot, default: 0)
   --json                    Print raw status JSON
   --help                    Show this help
@@ -62,43 +64,33 @@ fail() {
   exit 1
 }
 
-extract_json() {
-  local raw="$1"
-  local json
-  json="$(printf '%s\n' "$raw" | awk 'BEGIN{capture=0} /^[[:space:]]*[{]/ {capture=1} capture {print}')"
-  [[ -n "$json" ]] || return 1
-  printf '%s\n' "$json" | jq -e . >/dev/null 2>&1 || return 1
-  printf '%s\n' "$json"
-}
-
-build_exec_cmd() {
-  local -a base_cmd
-  local -a exec_cmd
-
-  base_cmd=("$OPENCLAW_BIN" "--log-level" "error" "--no-color" "$@")
+build_timed_cmd() {
+  local -a cmd
+  cmd=("$@")
 
   if [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( COMMAND_TIMEOUT_SECONDS > 0 )) && command -v timeout >/dev/null 2>&1; then
-    exec_cmd=(timeout --foreground "${COMMAND_TIMEOUT_SECONDS}" "${base_cmd[@]}")
+    printf '%s\n' timeout --foreground "${COMMAND_TIMEOUT_SECONDS}" "${cmd[@]}"
   else
-    exec_cmd=("${base_cmd[@]}")
+    printf '%s\n' "${cmd[@]}"
   fi
-
-  printf '%s\n' "${exec_cmd[@]}"
 }
 
-run_openclaw() {
+run_runtime_cmd() {
+  local -a cmd
   local -a exec_cmd
   local -a env_args
-  mapfile -t exec_cmd < <(build_exec_cmd "$@")
+
+  cmd=("$@")
+  mapfile -t exec_cmd < <(build_timed_cmd "${cmd[@]}")
+
+  env_args=()
+  [[ -n "$RUNTIME_HOME" ]] && env_args+=("HOME=$RUNTIME_HOME")
+  [[ -n "$RUNTIME_PATH" ]] && env_args+=("PATH=$RUNTIME_PATH")
+  [[ -n "$STATE_DIR" ]] && env_args+=("OPENCLAW_STATE_DIR=$STATE_DIR")
+  [[ -n "$CONFIG_PATH" ]] && env_args+=("OPENCLAW_CONFIG_PATH=$CONFIG_PATH")
+  [[ -n "$WORKSPACE_DIR" ]] && env_args+=("OPENCLAW_WORKSPACE=$WORKSPACE_DIR")
 
   if [[ -n "$RUNTIME_USER" && "$(id -un)" != "$RUNTIME_USER" ]]; then
-    env_args=()
-    [[ -n "$RUNTIME_HOME" ]] && env_args+=("HOME=$RUNTIME_HOME")
-    [[ -n "$RUNTIME_PATH" ]] && env_args+=("PATH=$RUNTIME_PATH")
-    [[ -n "$STATE_DIR" ]] && env_args+=("OPENCLAW_STATE_DIR=$STATE_DIR")
-    [[ -n "$CONFIG_PATH" ]] && env_args+=("OPENCLAW_CONFIG_PATH=$CONFIG_PATH")
-    [[ -n "$WORKSPACE_DIR" ]] && env_args+=("OPENCLAW_WORKSPACE=$WORKSPACE_DIR")
-
     if [[ "${#env_args[@]}" -gt 0 ]]; then
       sudo -n -u "$RUNTIME_USER" /usr/bin/env "${env_args[@]}" "${exec_cmd[@]}"
     else
@@ -106,12 +98,6 @@ run_openclaw() {
     fi
     return
   fi
-
-  env_args=()
-  [[ -n "$RUNTIME_PATH" ]] && env_args+=("PATH=$RUNTIME_PATH")
-  [[ -n "$STATE_DIR" ]] && env_args+=("OPENCLAW_STATE_DIR=$STATE_DIR")
-  [[ -n "$CONFIG_PATH" ]] && env_args+=("OPENCLAW_CONFIG_PATH=$CONFIG_PATH")
-  [[ -n "$WORKSPACE_DIR" ]] && env_args+=("OPENCLAW_WORKSPACE=$WORKSPACE_DIR")
 
   if [[ "${#env_args[@]}" -gt 0 ]]; then
     /usr/bin/env "${env_args[@]}" "${exec_cmd[@]}"
@@ -121,15 +107,21 @@ run_openclaw() {
 }
 
 fetch_status_json() {
+  local -a helper_cmd
   local raw
-  local json
-  if ! raw="$(run_openclaw gateway call codex-fallback.status --params '{}' --json 2>&1)"; then
-    fail "gateway call failed: $raw"
+
+  helper_cmd=("$GATEWAY_CALL_HELPER" --openclaw-bin "$OPENCLAW_BIN" --method codex-fallback.status --params '{}')
+  [[ -n "$OPENCLAW_PACKAGE_ROOT" ]] && helper_cmd+=(--openclaw-package-root "$OPENCLAW_PACKAGE_ROOT")
+  if [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && (( COMMAND_TIMEOUT_SECONDS > 0 )); then
+    helper_cmd+=(--timeout-ms "$(( COMMAND_TIMEOUT_SECONDS * 1000 ))")
   fi
-  if ! json="$(extract_json "$raw")"; then
-    fail "non-JSON gateway response: $raw"
+
+  if ! raw="$(run_runtime_cmd "${helper_cmd[@]}" 2>&1)"; then
+    fail "gateway status call failed: $raw"
   fi
-  printf '%s\n' "$json"
+
+  printf '%s\n' "$raw" | jq -e . >/dev/null 2>&1 || fail "non-JSON gateway response: $raw"
+  printf '%s\n' "$raw"
 }
 
 emit_human_status() {
@@ -219,11 +211,30 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
-if ! [[ "$WATCH_SECONDS" =~ ^[0-9]+$ ]]; then
-  fail "--watch must be a non-negative integer"
+if [[ "$OPENCLAW_BIN" != /* ]]; then
+  OPENCLAW_BIN_RESOLVED="$(command -v "$OPENCLAW_BIN" || true)"
+  [[ -n "$OPENCLAW_BIN_RESOLVED" ]] || fail "openclaw binary not found in PATH: $OPENCLAW_BIN"
+  OPENCLAW_BIN="$OPENCLAW_BIN_RESOLVED"
+fi
+[[ -x "$OPENCLAW_BIN" ]] || fail "openclaw binary is not executable: $OPENCLAW_BIN"
+[[ -x "$GATEWAY_CALL_HELPER" ]] || fail "gateway helper is not executable: $GATEWAY_CALL_HELPER"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+
+if [[ -n "$RUNTIME_USER" && -z "$RUNTIME_HOME" ]]; then
+  RUNTIME_HOME="/home/$RUNTIME_USER"
 fi
 
-while true; do
+if ! [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+  fail "--cmd-timeout must be an integer"
+fi
+if (( COMMAND_TIMEOUT_SECONDS < 0 )); then
+  fail "--cmd-timeout must be >= 0"
+fi
+if ! [[ "$WATCH_SECONDS" =~ ^[0-9]+$ ]]; then
+  fail "--watch must be an integer"
+fi
+
+while :; do
   status_json="$(fetch_status_json)"
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     printf '%s\n' "$status_json"
@@ -231,7 +242,7 @@ while true; do
     emit_human_status "$status_json"
   fi
 
-  if (( WATCH_SECONDS == 0 )); then
+  if (( WATCH_SECONDS <= 0 )); then
     break
   fi
   sleep "$WATCH_SECONDS"

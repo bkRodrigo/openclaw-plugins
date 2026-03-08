@@ -1,9 +1,22 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config/types.js";
 import type { OpenClawPluginApi, PluginHookAgentContext } from "openclaw/plugin-sdk";
+import {
+  armFallbackWindow,
+  cleanupExpiredFallbackWindow,
+  clearFallbackWindow,
+  createCircuitState,
+  isFallbackActive,
+  pinFallback,
+  refreshThrottleFallback,
+  releasePinnedFallback,
+  remainingSeconds,
+} from "./core.mjs";
+import { applyAgentFailureToCircuit } from "./auth-outage.mjs";
 
 type PluginCfg = {
   enabled: boolean;
   cooldownMs: number;
+  authOutagePinEnabled: boolean;
   primaryProvider: string;
   primaryModelPrefixes: string[];
   fallbackProvider: string;
@@ -16,6 +29,11 @@ type CircuitState = {
   lastThrottleReason: string;
   lastAppliedAtMs: number;
   appliedCount: number;
+  pinned: boolean;
+  pinReason: string;
+  pinSource: string;
+  lastAuthOutageAtMs: number;
+  lastAuthOutageError: string;
 };
 
 type CircuitStatus = {
@@ -32,11 +50,18 @@ type CircuitStatus = {
   primaryModelPrefixes: string[];
   fallbackProvider: string;
   fallbackModel: string;
+  pinned: boolean;
+  pinReason: string | null;
+  pinSource: string | null;
+  authOutagePinEnabled: boolean;
+  lastAuthOutageAtMs: number | null;
+  lastAuthOutageError: string | null;
 };
 
 const DEFAULT_CFG: PluginCfg = {
   enabled: true,
   cooldownMs: 5 * 60 * 1000,
+  authOutagePinEnabled: true,
   primaryProvider: "openai-codex",
   primaryModelPrefixes: ["gpt-5.3-codex", "gpt-5.2-codex"],
   fallbackProvider: "openai",
@@ -64,6 +89,11 @@ function normalizeCfg(raw: unknown): PluginCfg {
       ? Math.max(15, Math.min(3600, Math.floor(cooldownSecondsRaw)))
       : DEFAULT_CFG.cooldownMs / 1000;
 
+  const authOutagePinEnabled =
+    typeof cfgRaw.authOutagePinEnabled === "boolean"
+      ? cfgRaw.authOutagePinEnabled
+      : DEFAULT_CFG.authOutagePinEnabled;
+
   const primaryProvider =
     typeof cfgRaw.primaryProvider === "string" && cfgRaw.primaryProvider.trim().length > 0
       ? cfgRaw.primaryProvider.trim()
@@ -88,6 +118,7 @@ function normalizeCfg(raw: unknown): PluginCfg {
   return {
     enabled,
     cooldownMs: cooldownSeconds * 1000,
+    authOutagePinEnabled,
     primaryProvider,
     primaryModelPrefixes,
     fallbackProvider,
@@ -182,7 +213,7 @@ function buildStatus(cfg: PluginCfg, state: CircuitState): CircuitStatus {
   return {
     enabled: cfg.enabled,
     cooldownSeconds: Math.floor(cfg.cooldownMs / 1000),
-    active: cfg.enabled && state.untilMs > now,
+    active: cfg.enabled && isFallbackActive(state, now),
     fallbackUntilMs: state.untilMs || null,
     fallbackRemainingMs: state.untilMs > now ? state.untilMs - now : 0,
     lastThrottleAtMs: state.lastThrottleAtMs || null,
@@ -190,25 +221,16 @@ function buildStatus(cfg: PluginCfg, state: CircuitState): CircuitStatus {
     lastAppliedAtMs: state.lastAppliedAtMs || null,
     appliedCount: state.appliedCount,
     primaryProvider: cfg.primaryProvider,
+    authOutagePinEnabled: cfg.authOutagePinEnabled,
     primaryModelPrefixes: cfg.primaryModelPrefixes,
     fallbackProvider: cfg.fallbackProvider,
     fallbackModel: cfg.fallbackModel,
+    pinned: state.pinned === true,
+    pinReason: state.pinReason || null,
+    pinSource: state.pinSource || null,
+    lastAuthOutageAtMs: state.lastAuthOutageAtMs || null,
+    lastAuthOutageError: state.lastAuthOutageError || null,
   };
-}
-
-function arm(state: CircuitState, seconds: number): void {
-  const safeSeconds = Math.max(15, Math.min(3600, Math.floor(seconds)));
-  const now = Date.now();
-  state.untilMs = now + safeSeconds * 1000;
-  state.lastThrottleAtMs = now;
-  state.lastThrottleReason = `manual-arm:${safeSeconds}s`;
-}
-
-function remainingSeconds(state: CircuitState, now = Date.now()): number {
-  if (state.untilMs <= now) {
-    return 0;
-  }
-  return Math.ceil((state.untilMs - now) / 1000);
 }
 
 const fallbackPlugin = {
@@ -216,13 +238,7 @@ const fallbackPlugin = {
   name: "Codex/OpenAI Fallback",
   register(api: OpenClawPluginApi) {
     const cfg = normalizeCfg(api.pluginConfig);
-    const state: CircuitState = {
-      untilMs: 0,
-      lastThrottleAtMs: 0,
-      lastThrottleReason: "",
-      lastAppliedAtMs: 0,
-      appliedCount: 0,
-    };
+    const state = createCircuitState() as CircuitState;
 
     api.registerGatewayMethod("codex-fallback.status", ({ respond }: any) => {
       respond(true, buildStatus(cfg, state));
@@ -230,18 +246,38 @@ const fallbackPlugin = {
 
     api.registerGatewayMethod("codex-fallback.arm", ({ params, respond }: any) => {
       const secondsRaw = params && typeof params.seconds === "number" ? params.seconds : 60;
-      arm(state, secondsRaw);
+      const armedSeconds = armFallbackWindow(state, secondsRaw, "manual-arm");
       api.logger.warn(
         `codex-openai-fallback: fallback entered (source=manual-arm, until_ms=${state.untilMs}, remaining_s=${remainingSeconds(state)})`
       );
+      state.lastThrottleReason = `manual-arm:${armedSeconds}s`;
       respond(true, buildStatus(cfg, state));
     });
 
     api.registerGatewayMethod("codex-fallback.disarm", ({ respond }: any) => {
-      const wasActive = state.untilMs > Date.now();
-      state.untilMs = 0;
+      const wasActive = clearFallbackWindow(state);
       if (wasActive) {
         api.logger.info("codex-openai-fallback: fallback exited (source=manual-disarm)");
+      }
+      respond(true, buildStatus(cfg, state));
+    });
+
+    api.registerGatewayMethod("codex-fallback.pin", ({ params, respond }: any) => {
+      const reason =
+        params && typeof params.reason === "string" && params.reason.trim() ? params.reason.trim() : "pinned";
+      const source =
+        params && typeof params.source === "string" && params.source.trim() ? params.source.trim() : "manual-pin";
+      pinFallback(state, reason, source);
+      api.logger.warn(
+        `codex-openai-fallback: fallback pinned (source=${state.pinSource}, reason=${state.pinReason})`
+      );
+      respond(true, buildStatus(cfg, state));
+    });
+
+    api.registerGatewayMethod("codex-fallback.release", ({ respond }: any) => {
+      const wasPinned = releasePinnedFallback(state);
+      if (wasPinned) {
+        api.logger.info("codex-openai-fallback: fallback pin released");
       }
       respond(true, buildStatus(cfg, state));
     });
@@ -268,7 +304,13 @@ const fallbackPlugin = {
           console.log(`last_throttle_reason: ${payload.lastThrottleReason ?? "<none>"}`);
           console.log(`applied_count: ${payload.appliedCount}`);
           console.log(`primary: ${payload.primaryProvider}`);
+          console.log(`auth_outage_pin_enabled: ${payload.authOutagePinEnabled}`);
           console.log(`fallback: ${payload.fallbackProvider}/${payload.fallbackModel}`);
+          console.log(`pinned: ${payload.pinned}`);
+          console.log(`pin_reason: ${payload.pinReason ?? "<none>"}`);
+          console.log(`pin_source: ${payload.pinSource ?? "<none>"}`);
+          console.log(`last_auth_outage_at_ms: ${payload.lastAuthOutageAtMs ?? "<none>"}`);
+          console.log(`last_auth_outage_error: ${payload.lastAuthOutageError ?? "<none>"}`);
         });
 
       root
@@ -277,23 +319,46 @@ const fallbackPlugin = {
         .option("--seconds <n>", "Fallback duration in seconds", "60")
         .action((opts: { seconds?: string }) => {
           const seconds = Number.parseInt(opts.seconds ?? "60", 10) || 60;
-          arm(state, seconds);
+          const armedSeconds = armFallbackWindow(state, seconds, "cli-arm");
           api.logger.warn(
             `codex-openai-fallback: fallback entered (source=cli-arm, until_ms=${state.untilMs}, remaining_s=${remainingSeconds(state)})`
           );
-          console.log(`armed for ${Math.max(15, Math.min(3600, seconds))}s`);
+          console.log(`armed for ${armedSeconds}s`);
         });
 
       root
         .command("disarm")
         .description("Disable fallback mode immediately")
         .action(() => {
-          const wasActive = state.untilMs > Date.now();
-          state.untilMs = 0;
+          const wasActive = clearFallbackWindow(state);
           if (wasActive) {
             api.logger.info("codex-openai-fallback: fallback exited (source=cli-disarm)");
           }
           console.log("disarmed");
+        });
+
+      root
+        .command("pin")
+        .description("Pin fallback mode until explicitly released")
+        .option("--reason <text>", "Reason for the pin", "pinned")
+        .option("--source <text>", "Pin source label", "cli-pin")
+        .action((opts: { reason?: string; source?: string }) => {
+          pinFallback(state, opts.reason ?? "pinned", opts.source ?? "cli-pin");
+          api.logger.warn(
+            `codex-openai-fallback: fallback pinned (source=${state.pinSource}, reason=${state.pinReason})`
+          );
+          console.log("pinned");
+        });
+
+      root
+        .command("release")
+        .description("Release pinned fallback mode")
+        .action(() => {
+          const wasPinned = releasePinnedFallback(state);
+          if (wasPinned) {
+            api.logger.info("codex-openai-fallback: fallback pin released");
+          }
+          console.log("released");
         });
     });
 
@@ -308,13 +373,18 @@ const fallbackPlugin = {
       }
 
       const now = Date.now();
-      if (state.untilMs > 0 && state.untilMs <= now) {
-        api.logger.info(
-          `codex-openai-fallback: fallback exited (source=cooldown-expired, last_reason=${state.lastThrottleReason || "n/a"})`
-        );
-        state.untilMs = 0;
+      if (cleanupExpiredFallbackWindow(state, now)) {
+        if (state.pinned) {
+          api.logger.info(
+            `codex-openai-fallback: fallback cooldown expired but pin remains active (pin_source=${state.pinSource || "n/a"}, pin_reason=${state.pinReason || "n/a"})`
+          );
+        } else {
+          api.logger.info(
+            `codex-openai-fallback: fallback exited (source=cooldown-expired, last_reason=${state.lastThrottleReason || "n/a"})`
+          );
+        }
       }
-      if (state.untilMs <= now) {
+      if (!isFallbackActive(state, now)) {
         return;
       }
 
@@ -322,7 +392,7 @@ const fallbackPlugin = {
       state.lastAppliedAtMs = now;
 
       api.logger.info(
-        `codex-openai-fallback: fallback request routed (provider=${cfg.fallbackProvider}, model=${cfg.fallbackModel}, remaining_s=${remainingSeconds(state, now)})`
+        `codex-openai-fallback: fallback request routed (provider=${cfg.fallbackProvider}, model=${cfg.fallbackModel}, remaining_s=${remainingSeconds(state, now)}, pinned=${state.pinned === true ? "true" : "false"})`
       );
 
       return {
@@ -338,18 +408,35 @@ const fallbackPlugin = {
       if (event.success) {
         return;
       }
+
+      const now = Date.now();
+      if (cfg.authOutagePinEnabled) {
+        const authOutage = applyAgentFailureToCircuit(state, event, now);
+        if (authOutage) {
+          if (authOutage.wasPinned) {
+            api.logger.warn(
+              `codex-openai-fallback: auth outage detected while fallback already pinned (source=${state.pinSource}, reason=${state.pinReason})`
+            );
+          } else {
+            api.logger.error(
+              `codex-openai-fallback: auth outage detected; fallback pinned (source=${state.pinSource}, reason=${state.pinReason})`
+            );
+          }
+          return;
+        }
+      }
+
       if (!isRateLimitError(event.error)) {
         return;
       }
 
-      const now = Date.now();
-      const wasActive = state.untilMs > now;
-      const previousUntilMs = state.untilMs;
-      state.untilMs = now + cfg.cooldownMs;
-      state.lastThrottleAtMs = now;
-      state.lastThrottleReason = typeof event.error === "string" ? event.error : "rate-limit";
-      const previousRemainingSeconds = previousUntilMs > now ? Math.ceil((previousUntilMs - now) / 1000) : 0;
-      if (wasActive) {
+      const { wasWindowActive, previousRemainingSeconds } = refreshThrottleFallback(
+        state,
+        cfg.cooldownMs,
+        typeof event.error === "string" ? event.error : "rate-limit",
+        now
+      );
+      if (wasWindowActive) {
         api.logger.warn(
           `codex-openai-fallback: fallback window refreshed (source=throttle, previous_remaining_s=${previousRemainingSeconds}, new_remaining_s=${remainingSeconds(state, now)})`
         );
@@ -361,7 +448,7 @@ const fallbackPlugin = {
     });
 
     api.logger.info(
-      `codex-openai-fallback: loaded (primary=${cfg.primaryProvider}, fallback=${cfg.fallbackProvider}/${cfg.fallbackModel}, cooldown=${Math.floor(cfg.cooldownMs / 1000)}s)`
+      `codex-openai-fallback: loaded (primary=${cfg.primaryProvider}, fallback=${cfg.fallbackProvider}/${cfg.fallbackModel}, cooldown=${Math.floor(cfg.cooldownMs / 1000)}s, auth_outage_pin_enabled=${cfg.authOutagePinEnabled ? "true" : "false"})`
     );
   },
 };

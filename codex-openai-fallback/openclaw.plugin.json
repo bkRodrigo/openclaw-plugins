@@ -1,13 +1,14 @@
 {
   "id": "codex-openai-fallback",
   "name": "Codex/OpenAI Fallback",
-  "description": "Rate-limit circuit breaker that falls back from openai-codex to openai API and auto-recovers.",
+  "description": "Circuit breaker that falls back from openai-codex to openai API for throttle windows and auth-refresh outages.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "enabled": { "type": "boolean" },
       "cooldownSeconds": { "type": "integer", "minimum": 15, "maximum": 3600 },
+      "authOutagePinEnabled": { "type": "boolean" },
       "primaryProvider": { "type": "string" },
       "primaryModelPrefixes": {
         "type": "array",
