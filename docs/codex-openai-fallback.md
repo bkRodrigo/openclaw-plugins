@@ -26,6 +26,7 @@ Provide a fallback path from a primary Codex provider/model to an OpenAI API pro
 - Pins fallback automatically when Telegram emits the user-facing auth failure reply for the same outage class.
 - Supports pinned fallback state for operator-controlled outage windows.
 - Overrides provider/model while fallback window is active.
+- Coordinates with `codex-telegram-reauth`, which keeps fallback pinned during SSO recovery and releases it only after primary verification succeeds.
 - Exposes control/status methods:
   - `codex-fallback.status`
   - `codex-fallback.arm`
@@ -114,6 +115,16 @@ Pinned and auth-outage status fields:
 Pinned fallback remains active even after a timed cooldown expires and must be released explicitly.
 
 Use `codex-fallback.debug-reset` before a live drill if you want a clean hook counter snapshot for the next test.
+
+## Validated Recovery Loop
+
+Validated live on this host with `codex-telegram-reauth`:
+
+1. `openai-codex` SSO refresh fails.
+2. fallback pins automatically and Telegram traffic continues on `openai/gpt-5.3-codex`.
+3. operator runs `/reauth`, completes browser login, and sends `/reauth_paste <redirect-url>`.
+4. `codex-telegram-reauth` verifies primary `openai-codex`.
+5. fallback pin is released and subsequent Telegram turns return to `openai-codex/gpt-5.3-codex`.
 
 ## Script Configuration
 

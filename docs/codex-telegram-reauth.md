@@ -39,7 +39,7 @@ Completed in `codex-telegram-reauth`:
 - real OpenAI Codex OAuth URL issuance is implemented
 - redirect pasteback completion is implemented
 - refreshed OAuth credentials are written back to the OpenClaw auth profile store
-- primary verification runs in-process via `pi-ai completeSimple()` against `openai-codex`
+- primary verification runs in-process via `pi-ai complete()` against `openai-codex`
 - fallback is released only after primary verification passes
 
 Still to build in `codex-telegram-reauth`:
@@ -47,6 +47,25 @@ Still to build in `codex-telegram-reauth`:
 - automatic Telegram outage notification when fallback enters auth-outage mode
 - browser callback endpoint as an alternative to redirect pasteback
 - broader recovery UX polish and failure telemetry
+
+## Validated Operator Flow
+
+Validated live on this host:
+
+1. `openai-codex` SSO refresh fails on the main Telegram agent.
+2. `codex-openai-fallback` pins fallback and the main agent continues replying through `openai/gpt-5.3-codex`.
+3. Operator runs `/reauth` in the same Telegram chat.
+4. Plugin returns a real OpenAI authorization URL.
+5. Operator completes browser login and sends `/reauth_paste <redirect-url>`.
+6. Plugin stores refreshed OAuth credentials in the `openai-codex` auth profile.
+7. Plugin verifies primary in-process with a deterministic prompt expecting `PRIMARY_REAUTH_OK`.
+8. On verification success, fallback is released and subsequent Telegram turns return to `openai-codex/gpt-5.3-codex`.
+
+Expected steady-state after successful recovery:
+
+- `/reauth_status` reports `Outage active: no`
+- `/reauth_status` reports `Fallback pinned: no`
+- latest Telegram session entries show `provider=openai-codex` and `model=gpt-5.3-codex`
 
 ## Non-Goals
 
@@ -104,6 +123,12 @@ Design consequence:
 
 - outage detection must remain in `codex-openai-fallback`
 - `codex-telegram-reauth` should consume fallback outage state instead of trying to rediscover the outage independently
+
+Verification implementation detail:
+
+- the verifier runs in-process through `@mariozechner/pi-ai`
+- it uses `complete()` with the verification prompt in `context.systemPrompt`
+- a plain user-message-only call is not sufficient for this Codex provider path and can return `Instructions are required`
 
 ## Fallback Coordination Contract
 
@@ -212,6 +237,13 @@ Suggested fields:
 - `lastTelegramNoticeAt`
 - `lastFailureReason`
 
+Successful recovery should end with:
+
+- `outageActive=false`
+- `fallbackPinned=false`
+- `session.status=recovered`
+- `session.verificationPassedAt` populated
+
 ## Trigger Conditions
 
 Canonical trigger source for the reauth plugin:
@@ -264,6 +296,17 @@ Supported commands:
 - `/reauth_paste <redirect-url>`
 - `/fallback_status`
 
+Current live command contract:
+
+- `/reauth_status`
+  - returns outage state, fallback state, session status, session id, and last failure reason
+- `/reauth`
+  - starts a reauth session and returns a real OpenAI auth URL
+- `/reauth_paste <redirect-url>`
+  - completes the OAuth flow using the redirect URL from the browser redirect
+- `/reauth_cancel`
+  - cancels the active session and leaves fallback pinned if the outage is still active
+
 Reauth start response:
 
 - reauth session started
@@ -309,8 +352,6 @@ Practical flow:
 6. plugin persists refreshed credentials
 7. plugin performs a deterministic primary model call using the stored `openai-codex` OAuth access token
 8. fallback is released only if that model call returns the expected exact text
-7. plugin verifies primary
-8. plugin releases fallback only if verification passes
 
 OpenClaw already has browser-based `openai-codex` OAuth behavior in runtime code. This plugin should reuse that behavior rather than inventing a new auth flow.
 
@@ -338,6 +379,12 @@ Recommended check:
 
 - run a tiny `openai-codex` primary turn
 - expect an exact output such as `PRIMARY_REAUTH_OK`
+
+Current implementation:
+
+- verification prompt is configured via `verificationPrompt`
+- the exact expected reply is configured via `verificationExpectedText`
+- the verifier uses the stored `openai-codex` OAuth credential directly instead of shelling out through the OpenClaw CLI
 
 Verification contract:
 
@@ -463,6 +510,23 @@ Remaining:
 11. implement deterministic primary verification
 12. implement fallback release only on verified success
 13. add docs and live validation for the reauth workflow
+
+Now completed:
+
+6. scaffold `codex-telegram-reauth`
+7. implement persisted reauth session state and deterministic gateway control surface
+8. implement Telegram control commands
+9. implement OAuth helper start/completion
+10. implement redirect pasteback completion
+11. implement deterministic primary verification
+12. implement fallback release only on verified success
+13. add docs and live validation for the reauth workflow
+
+Still remaining:
+
+14. automatic Telegram outage notification when auth-outage fallback is pinned
+15. optional browser callback endpoint to avoid redirect pasteback
+16. additional recovery UX and telemetry polish
 
 ## MVP Decision
 
