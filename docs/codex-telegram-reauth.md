@@ -15,6 +15,26 @@ Provide an operator recovery path for `openai-codex` SSO outages from the main T
 - Verify primary `openai-codex` works before releasing fallback.
 - Notify the operator in Telegram when recovery succeeds or when reauth completes but primary is still broken.
 
+## Current Status
+
+Completed in `codex-openai-fallback`:
+
+- pinned fallback state and explicit gateway controls
+  - `codex-fallback.pin`
+  - `codex-fallback.release`
+- auth-outage detection for `openai-codex`
+- debug/status telemetry for live drills
+- preflight auth probing in `before_model_resolve`
+- live Telegram validation that SSO outage now falls back to `openai/gpt-5.3-codex`
+
+Still to build in `codex-telegram-reauth`:
+
+- deterministic Telegram operator workflow
+- OAuth URL issuance and completion flow
+- primary verification after reauth
+- fallback release after verified recovery
+- operator-visible outage/recovery notifications
+
 ## Non-Goals
 
 - Do not replace the existing `codex-openai-fallback` plugin.
@@ -49,14 +69,25 @@ Two-plugin model:
 
 - `codex-openai-fallback`
   - owns provider/model routing
-  - must expose deterministic pin/release controls
+  - owns auth-outage detection for live traffic
+  - must expose deterministic pin/release controls and observable status
 - `codex-telegram-reauth`
-  - owns outage detection
   - owns Telegram operator workflow
   - owns reauth session lifecycle
   - owns primary verification and fallback release decision
 
 The recovery path must bypass the normal LLM chat path. If `openai-codex` auth is broken, the operator still needs a reliable deterministic control surface in the same Telegram chat.
+
+Reality check from live testing:
+
+- `before_model_resolve` is the last reliable plugin hook before the broken `openai-codex` OAuth refresh path executes
+- `agent_end` is not reliable as the first/only outage trigger for Telegram first-turn failures
+- `message_sending` is useful for observation only when a user-facing failure message is actually emitted
+
+Design consequence:
+
+- outage detection must remain in `codex-openai-fallback`
+- `codex-telegram-reauth` should consume fallback outage state instead of trying to rediscover the outage independently
 
 ## Fallback Coordination Contract
 
@@ -78,6 +109,20 @@ Fallback status should eventually include:
 - `pinned`
 - `pinReason`
 - `pinSource`
+
+Fallback status already includes:
+
+- `pinned`
+- `pinReason`
+- `pinSource`
+- `lastAuthOutageAtMs`
+- `lastAuthOutageError`
+- debug counters and last-hook snapshots
+
+Recommended coordination rule for the reauth plugin:
+
+- treat `pinReason=auth-outage` as the canonical outage signal
+- do not implement a separate competing outage detector unless a new hook/path forces it
 
 Behavioral rule:
 
@@ -150,28 +195,34 @@ Suggested fields:
 
 ## Trigger Conditions
 
-Automatic trigger source:
+Canonical trigger source for the reauth plugin:
 
-- `agent_end`
+- `codex-openai-fallback` status/state indicating an auth outage pin
 
-Trigger only on targeted `openai-codex` auth failures such as:
+Canonical outage indicators:
+
+- `pinned=true`
+- `pinReason=auth-outage`
+- `pinSource=auth-refresh`
+
+The fallback plugin already classifies targeted `openai-codex` auth failures such as:
 
 - `OAuth token refresh failed for openai-codex`
 - `refresh_token_reused`
 - `Please try again or re-authenticate`
 - `401` in codex auth-refresh context
 
-Do not trigger on:
+Do not trigger Telegram reauth flow on:
 
 - generic tool failures
 - user prompt/content failures
 - unrelated provider failures
-- rate-limit failures already handled by the fallback plugin
+- rate-limit failures already handled by cooldown fallback
 
-On first valid auth-outage trigger:
+On first observed auth-outage pin:
 
-1. mark outage active
-2. pin fallback
+1. mark outage active in reauth plugin state
+2. keep fallback pinned
 3. send one operator notification in Telegram
 4. create or reopen recovery session
 
@@ -343,10 +394,10 @@ Operator-visible distinctions should be preserved:
 
 Required tests:
 
-- auth failure matcher triggers outage only for `openai-codex` auth errors
-- non-auth failures do not trigger outage
-- duplicate outage does not spam
 - fallback pin/release contract behaves correctly
+- preflight auth probing identifies `openai-codex` auth-refresh outages before the normal run path fails
+- Telegram first-turn outage routes through fallback after preflight auth detection
+- duplicate outage does not spam
 - outage notice emitted once
 - `/reauth` creates session and emits URL
 - unauthorized Telegram user/chat is rejected
@@ -358,25 +409,33 @@ Required tests:
 End-to-end host validation should cover:
 
 1. break `openai-codex` auth
-2. observe Telegram outage notice
-3. complete reauth
-4. verify primary success
-5. verify fallback release
+2. verify main Telegram agent still replies through fallback
+3. observe Telegram outage notice from reauth plugin
+4. complete reauth
+5. verify primary success
+6. verify fallback release
 
 ## Delivery Plan
 
 Recommended delivery order:
 
+Completed:
+
 1. extend `codex-openai-fallback` with pinned fallback state and gateway controls
 2. add tests for pinned fallback semantics
-3. scaffold `codex-telegram-reauth`
-4. implement auth-outage detection and session persistence
-5. implement Telegram notice and control commands
-6. implement OAuth helper start/completion
-7. implement callback or pasteback completion
-8. implement deterministic primary verification
-9. implement fallback release only on verified success
-10. add docs and live validation
+3. add auth-outage detection plus Telegram-path preflight routing in `codex-openai-fallback`
+4. add live debug telemetry and regression coverage
+5. validate live Telegram fallback under real `openai-codex` SSO outage
+
+Remaining:
+
+6. scaffold `codex-telegram-reauth`
+7. implement reauth session persistence and Telegram notice/control commands
+8. implement OAuth helper start/completion
+9. implement callback or pasteback completion
+10. implement deterministic primary verification
+11. implement fallback release only on verified success
+12. add docs and live validation for the reauth workflow
 
 ## MVP Decision
 
