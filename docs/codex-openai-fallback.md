@@ -13,12 +13,14 @@ Provide a fallback path from a primary Codex provider/model to an OpenAI API pro
 ## Source
 
 - `codex-openai-fallback/index.ts`
+- `codex-openai-fallback/auth-preflight.mjs`
 - `codex-openai-fallback/openclaw.plugin.json`
 
 ## Runtime Behavior
 
 - Watches for rate-limit/throttle style failures.
 - Watches for targeted `openai-codex` OAuth refresh/auth failures.
+- Preflights primary `openai-codex` auth in `before_model_resolve` so first-turn Telegram auth outages can reroute before OpenClaw reaches the failing SSO refresh path.
 - Activates fallback window (`cooldownSeconds`) after qualifying throttle failures.
 - Pins fallback automatically for qualifying auth-refresh outages.
 - Pins fallback automatically when Telegram emits the user-facing auth failure reply for the same outage class.
@@ -30,6 +32,7 @@ Provide a fallback path from a primary Codex provider/model to an OpenAI API pro
   - `codex-fallback.disarm`
   - `codex-fallback.pin`
   - `codex-fallback.release`
+  - `codex-fallback.debug-reset`
 
 ## Default Routing Model
 
@@ -99,8 +102,18 @@ Pinned and auth-outage status fields:
 - `authOutagePinEnabled`
 - `lastAuthOutageAtMs`
 - `lastAuthOutageError`
+- `debug.beforeModelResolveCalls`
+- `debug.agentEndCalls`
+- `debug.messageSendingCalls`
+- `debug.lastHookName`
+- `debug.lastHookAtMs`
+- `debug.lastContentPrefix`
+- `debug.lastChannelId`
+- `debug.lastError`
 
 Pinned fallback remains active even after a timed cooldown expires and must be released explicitly.
+
+Use `codex-fallback.debug-reset` before a live drill if you want a clean hook counter snapshot for the next test.
 
 ## Script Configuration
 

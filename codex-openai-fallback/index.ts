@@ -7,11 +7,14 @@ import {
   createCircuitState,
   isFallbackActive,
   pinFallback,
+  recordDebugHookEvent,
   refreshThrottleFallback,
+  resetDebugState,
   releasePinnedFallback,
   remainingSeconds,
 } from "./core.mjs";
 import { applyAgentFailureToCircuit, applyMessageSendingEventToCircuit } from "./auth-outage.mjs";
+import { probePrimaryAuthAvailability } from "./auth-preflight.mjs";
 
 type PluginCfg = {
   enabled: boolean;
@@ -34,6 +37,16 @@ type CircuitState = {
   pinSource: string;
   lastAuthOutageAtMs: number;
   lastAuthOutageError: string;
+  debug: {
+    beforeModelResolveCalls: number;
+    agentEndCalls: number;
+    messageSendingCalls: number;
+    lastHookName: string;
+    lastHookAtMs: number;
+    lastContentPrefix: string;
+    lastChannelId: string;
+    lastError: string;
+  };
 };
 
 type CircuitStatus = {
@@ -56,6 +69,16 @@ type CircuitStatus = {
   authOutagePinEnabled: boolean;
   lastAuthOutageAtMs: number | null;
   lastAuthOutageError: string | null;
+  debug: {
+    beforeModelResolveCalls: number;
+    agentEndCalls: number;
+    messageSendingCalls: number;
+    lastHookName: string | null;
+    lastHookAtMs: number | null;
+    lastContentPrefix: string | null;
+    lastChannelId: string | null;
+    lastError: string | null;
+  };
 };
 
 const DEFAULT_CFG: PluginCfg = {
@@ -230,6 +253,16 @@ function buildStatus(cfg: PluginCfg, state: CircuitState): CircuitStatus {
     pinSource: state.pinSource || null,
     lastAuthOutageAtMs: state.lastAuthOutageAtMs || null,
     lastAuthOutageError: state.lastAuthOutageError || null,
+    debug: {
+      beforeModelResolveCalls: state.debug.beforeModelResolveCalls,
+      agentEndCalls: state.debug.agentEndCalls,
+      messageSendingCalls: state.debug.messageSendingCalls,
+      lastHookName: state.debug.lastHookName || null,
+      lastHookAtMs: state.debug.lastHookAtMs || null,
+      lastContentPrefix: state.debug.lastContentPrefix || null,
+      lastChannelId: state.debug.lastChannelId || null,
+      lastError: state.debug.lastError || null,
+    },
   };
 }
 
@@ -282,6 +315,11 @@ const fallbackPlugin = {
       respond(true, buildStatus(cfg, state));
     });
 
+    api.registerGatewayMethod("codex-fallback.debug-reset", ({ respond }: any) => {
+      resetDebugState(state);
+      respond(true, buildStatus(cfg, state));
+    });
+
     api.registerCli(({ program }) => {
       const root = program
         .command("codex-fallback")
@@ -311,6 +349,14 @@ const fallbackPlugin = {
           console.log(`pin_source: ${payload.pinSource ?? "<none>"}`);
           console.log(`last_auth_outage_at_ms: ${payload.lastAuthOutageAtMs ?? "<none>"}`);
           console.log(`last_auth_outage_error: ${payload.lastAuthOutageError ?? "<none>"}`);
+          console.log(`debug_before_model_resolve_calls: ${payload.debug.beforeModelResolveCalls}`);
+          console.log(`debug_agent_end_calls: ${payload.debug.agentEndCalls}`);
+          console.log(`debug_message_sending_calls: ${payload.debug.messageSendingCalls}`);
+          console.log(`debug_last_hook_name: ${payload.debug.lastHookName ?? "<none>"}`);
+          console.log(`debug_last_hook_at_ms: ${payload.debug.lastHookAtMs ?? "<none>"}`);
+          console.log(`debug_last_channel_id: ${payload.debug.lastChannelId ?? "<none>"}`);
+          console.log(`debug_last_content_prefix: ${payload.debug.lastContentPrefix ?? "<none>"}`);
+          console.log(`debug_last_error: ${payload.debug.lastError ?? "<none>"}`);
         });
 
       root
@@ -362,7 +408,7 @@ const fallbackPlugin = {
         });
     });
 
-    api.on("before_model_resolve", (_event, ctx: PluginHookAgentContext) => {
+    api.on("before_model_resolve", async (_event, ctx: PluginHookAgentContext) => {
       if (!cfg.enabled) {
         return;
       }
@@ -373,6 +419,14 @@ const fallbackPlugin = {
       }
 
       const now = Date.now();
+      recordDebugHookEvent(
+        state,
+        "before_model_resolve",
+        {
+          contentPrefix: _event?.prompt,
+        },
+        now
+      );
       if (cleanupExpiredFallbackWindow(state, now)) {
         if (state.pinned) {
           api.logger.info(
@@ -382,6 +436,35 @@ const fallbackPlugin = {
           api.logger.info(
             `codex-openai-fallback: fallback exited (source=cooldown-expired, last_reason=${state.lastThrottleReason || "n/a"})`
           );
+        }
+      }
+      if (!isFallbackActive(state, now) && cfg.authOutagePinEnabled) {
+        const preflight = await probePrimaryAuthAvailability({
+          cfg: api.config,
+          provider: selected.provider ?? cfg.primaryProvider,
+          agentId: ctx.agentId,
+        });
+        state.debug.lastError = preflight.error || "";
+        if (preflight.kind === "auth_outage") {
+          const authOutage = applyAgentFailureToCircuit(
+            state,
+            {
+              success: false,
+              error: preflight.error,
+            },
+            now
+          );
+          if (authOutage) {
+            if (authOutage.wasPinned) {
+              api.logger.warn(
+                `codex-openai-fallback: auth outage preflight matched while fallback already pinned (source=${state.pinSource}, reason=${state.pinReason})`
+              );
+            } else {
+              api.logger.error(
+                `codex-openai-fallback: auth outage preflight matched; fallback pinned before model resolve (source=${state.pinSource}, reason=${state.pinReason})`
+              );
+            }
+          }
         }
       }
       if (!isFallbackActive(state, now)) {
@@ -406,10 +489,26 @@ const fallbackPlugin = {
         return;
       }
       if (event.success) {
+        recordDebugHookEvent(
+          state,
+          "agent_end",
+          {
+            error: "",
+          },
+          Date.now()
+        );
         return;
       }
 
       const now = Date.now();
+      recordDebugHookEvent(
+        state,
+        "agent_end",
+        {
+          error: typeof event.error === "string" ? event.error : "",
+        },
+        now
+      );
       if (cfg.authOutagePinEnabled) {
         const authOutage = applyAgentFailureToCircuit(state, event, now);
         if (authOutage) {
@@ -455,6 +554,15 @@ const fallbackPlugin = {
         return;
       }
       const now = Date.now();
+      recordDebugHookEvent(
+        state,
+        "message_sending",
+        {
+          channelId: ctx.channelId,
+          contentPrefix: event.content,
+        },
+        now
+      );
       const authOutage = applyMessageSendingEventToCircuit(state, event, now);
       if (!authOutage) {
         return;

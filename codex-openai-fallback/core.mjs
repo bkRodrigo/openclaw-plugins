@@ -1,3 +1,16 @@
+function createDebugState() {
+  return {
+    beforeModelResolveCalls: 0,
+    agentEndCalls: 0,
+    messageSendingCalls: 0,
+    lastHookName: "",
+    lastHookAtMs: 0,
+    lastContentPrefix: "",
+    lastChannelId: "",
+    lastError: "",
+  };
+}
+
 export function createCircuitState() {
   return {
     untilMs: 0,
@@ -10,7 +23,45 @@ export function createCircuitState() {
     pinSource: "",
     lastAuthOutageAtMs: 0,
     lastAuthOutageError: "",
+    debug: createDebugState(),
   };
+}
+
+function sanitizeDebugText(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+export function resetDebugState(state) {
+  state.debug = createDebugState();
+}
+
+export function recordDebugHookEvent(state, hookName, details = {}, now = Date.now()) {
+  if (!state.debug || typeof state.debug !== "object") {
+    state.debug = createDebugState();
+  }
+
+  switch (hookName) {
+    case "before_model_resolve":
+      state.debug.beforeModelResolveCalls += 1;
+      break;
+    case "agent_end":
+      state.debug.agentEndCalls += 1;
+      break;
+    case "message_sending":
+      state.debug.messageSendingCalls += 1;
+      break;
+    default:
+      break;
+  }
+
+  state.debug.lastHookName = hookName;
+  state.debug.lastHookAtMs = now;
+  state.debug.lastContentPrefix = sanitizeDebugText(details.contentPrefix);
+  state.debug.lastChannelId = sanitizeDebugText(details.channelId);
+  state.debug.lastError = sanitizeDebugText(details.error);
 }
 
 export function remainingSeconds(state, now = Date.now()) {
