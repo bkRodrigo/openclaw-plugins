@@ -4,13 +4,12 @@ import path from "path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 import { createCommandHandlers } from "./commands.mjs";
+import { createStateStore } from "./store.mjs";
 import {
   beginOutage,
   buildStatus,
   cancelReauthSession,
   createSessionId,
-  loadState,
-  saveState,
   startReauthSession,
 } from "./state.mjs";
 
@@ -99,23 +98,21 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     const cfg = normalizeCfg(api.pluginConfig);
     const statePath = resolveStatePath();
-    let state = loadState(statePath);
-
-    const persist = () => {
-      saveState(statePath, state);
-    };
+    const store = createStateStore(statePath);
+    store.ensure();
 
     const commandHandlers = createCommandHandlers({
       cfg,
-      getState: () => state,
-      saveState: () => {
-        persist();
+      getState: () => store.read(),
+      saveState: (state: any) => {
+        store.write(state);
       },
       createAuthUrl: async (sessionId: string) =>
         `https://reauth-placeholder.invalid/openai-codex?session=${encodeURIComponent(sessionId)}`,
     });
 
     api.registerGatewayMethod("codex-reauth.status", ({ respond }: any) => {
+      const state = store.read();
       respond(true, {
         enabled: cfg.enabled,
         fallbackPluginId: cfg.fallbackPluginId,
@@ -131,57 +128,67 @@ const plugin = {
 
     api.registerGatewayMethod("codex-reauth.begin-outage", ({ params, respond }: any) => {
       const now = Date.now();
-      const result = beginOutage(
-        state,
-        {
-          reason: params?.reason,
-          fallbackPinned: params?.fallbackPinned === true,
-          fallbackPinReason: params?.fallbackPinReason,
-          fallbackPinSource: params?.fallbackPinSource,
-          failureReason: params?.failureReason,
-        },
-        now
-      );
-      persist();
+      let changed = false;
+      const state = store.update((current) => {
+        const result = beginOutage(
+          current,
+          {
+            reason: params?.reason,
+            fallbackPinned: params?.fallbackPinned === true,
+            fallbackPinReason: params?.fallbackPinReason,
+            fallbackPinSource: params?.fallbackPinSource,
+            failureReason: params?.failureReason,
+          },
+          now
+        );
+        changed = result.changed;
+        return current;
+      });
       respond(true, {
-        changed: result.changed,
+        changed,
         state: buildStatus(state),
       });
     });
 
     api.registerGatewayMethod("codex-reauth.start", ({ params, respond }: any) => {
       const now = Date.now();
-      const result = startReauthSession(
-        state,
-        {
-          sessionId: params?.sessionId || createSessionId(now),
-          chatId: params?.chatId,
-          userId: params?.userId,
-          authUrl: params?.authUrl,
-          expiresAt: now + cfg.sessionTtlSeconds * 1000,
-        },
-        now
-      );
-      persist();
-      respond(result.ok, {
-        reason: result.ok ? null : result.reason,
+      let gatewayResult: { ok: boolean; reason?: string };
+      const state = store.update((current) => {
+        gatewayResult = startReauthSession(
+          current,
+          {
+            sessionId: params?.sessionId || createSessionId(now),
+            chatId: params?.chatId,
+            userId: params?.userId,
+            authUrl: params?.authUrl,
+            expiresAt: now + cfg.sessionTtlSeconds * 1000,
+          },
+          now
+        );
+        return current;
+      });
+      respond(gatewayResult!.ok, {
+        reason: gatewayResult!.ok ? null : gatewayResult!.reason,
         state: buildStatus(state),
       });
     });
 
     api.registerGatewayMethod("codex-reauth.cancel", ({ params, respond }: any) => {
       const now = Date.now();
-      const result = cancelReauthSession(
-        state,
-        {
-          reason: params?.reason,
-          failureReason: params?.failureReason,
-        },
-        now
-      );
-      persist();
-      respond(result.ok, {
-        reason: result.ok ? null : result.reason,
+      let gatewayResult: { ok: boolean; reason?: string };
+      const state = store.update((current) => {
+        gatewayResult = cancelReauthSession(
+          current,
+          {
+            reason: params?.reason,
+            failureReason: params?.failureReason,
+          },
+          now
+        );
+        return current;
+      });
+      respond(gatewayResult!.ok, {
+        reason: gatewayResult!.ok ? null : gatewayResult!.reason,
         state: buildStatus(state),
       });
     });
@@ -216,6 +223,7 @@ const plugin = {
         .command("status")
         .option("--json", "Emit machine-readable JSON")
         .action((opts: { json?: boolean }) => {
+          const state = store.read();
           const payload = {
             enabled: cfg.enabled,
             fallbackPluginId: cfg.fallbackPluginId,
@@ -242,7 +250,7 @@ const plugin = {
     });
 
     if (!fs.existsSync(statePath)) {
-      persist();
+      store.ensure();
     }
 
     api.logger.info(
