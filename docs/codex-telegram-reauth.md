@@ -27,18 +27,26 @@ Completed in `codex-openai-fallback`:
 - preflight auth probing in `before_model_resolve`
 - live Telegram validation that SSO outage now falls back to `openai/gpt-5.3-codex`
 
-Completed in `codex-telegram-reauth` phase 1:
+Completed in `codex-telegram-reauth`:
 
-- plugin scaffold and persisted session state are now in place
+- plugin scaffold and persisted session state are in place
 - deterministic gateway control surface exists for status, outage start, session start, and session cancel
+- deterministic Telegram operator workflow exists:
+  - `/reauth_status`
+  - `/reauth`
+  - `/reauth_cancel`
+  - `/reauth_paste <redirect-url>`
+- real OpenAI Codex OAuth URL issuance is implemented
+- redirect pasteback completion is implemented
+- refreshed OAuth credentials are written back to the OpenClaw auth profile store
+- primary verification runs in-process via `pi-ai completeSimple()` against `openai-codex`
+- fallback is released only after primary verification passes
 
 Still to build in `codex-telegram-reauth`:
 
-- deterministic Telegram operator workflow
-- OAuth URL issuance and completion flow
-- primary verification after reauth
-- fallback release after verified recovery
-- operator-visible outage/recovery notifications
+- automatic Telegram outage notification when fallback enters auth-outage mode
+- browser callback endpoint as an alternative to redirect pasteback
+- broader recovery UX polish and failure telemetry
 
 ## Non-Goals
 
@@ -54,19 +62,22 @@ Expected plugin source:
 - `codex-telegram-reauth/index.ts`
 - `codex-telegram-reauth/openclaw.plugin.json`
 
-Expected documentation and tests:
+Current documentation and tests:
 
 - `docs/codex-telegram-reauth.md`
 - `tests/test-codex-telegram-reauth-state.sh`
-- `tests/test-codex-telegram-reauth-oauth-detection.sh`
-- `tests/test-codex-telegram-reauth-recovery-flow.sh`
+- `tests/test-codex-telegram-reauth-store.sh`
+- `tests/test-codex-telegram-reauth-commands.sh`
+- `tests/test-codex-telegram-reauth-oauth.sh`
+- `tests/test-codex-telegram-reauth-paste-command.sh`
 
-Likely helper modules if the implementation grows:
+Current helper modules:
 
-- `codex-telegram-reauth/state.ts`
-- `codex-telegram-reauth/oauth.ts`
-- `codex-telegram-reauth/telegram.ts`
-- `scripts/openclaw-codex-oauth-helper.mjs`
+- `codex-telegram-reauth/state.mjs`
+- `codex-telegram-reauth/store.mjs`
+- `codex-telegram-reauth/commands.mjs`
+- `codex-telegram-reauth/oauth.mjs`
+- `codex-telegram-reauth/runtime.mjs`
 
 ## Architecture
 
@@ -189,6 +200,9 @@ Suggested fields:
 - `chatId`
 - `userId`
 - `authUrl`
+- `verifier`
+- `expectedState`
+- `profileId`
 - `createdAt`
 - `expiresAt`
 - `callbackReceivedAt`
@@ -276,6 +290,11 @@ Failure response:
 - sanitized reason
 - `Retry with /reauth.`
 
+Current implementation note:
+
+- `/reauth_paste` is the live completion path today
+- automatic callback completion is still pending
+
 ## OAuth Flow
 
 Practical flow:
@@ -285,9 +304,11 @@ Practical flow:
 3. operator opens URL in a browser
 4. operator completes login
 5. completion happens via:
-   - preferred: callback received automatically
-   - fallback: redirect URL pasted back through Telegram
+   - current live path: redirect URL pasted back through Telegram
+   - future path: callback received automatically
 6. plugin persists refreshed credentials
+7. plugin performs a deterministic primary model call using the stored `openai-codex` OAuth access token
+8. fallback is released only if that model call returns the expected exact text
 7. plugin verifies primary
 8. plugin releases fallback only if verification passes
 

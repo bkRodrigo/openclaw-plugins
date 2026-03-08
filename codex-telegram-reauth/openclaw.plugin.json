@@ -14,6 +14,8 @@
       "alertCooldownSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
       "autoStartReauth": { "type": "boolean" },
       "allowPasteRedirect": { "type": "boolean" },
+      "agentId": { "type": "string" },
+      "oauthOriginator": { "type": "string" },
       "telegramChatIds": {
         "type": "array",
         "items": { "type": "string" }

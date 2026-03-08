@@ -4,6 +4,13 @@ import path from "path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
 import { createCommandHandlers } from "./commands.mjs";
+import { createAuthorizationStart, completeAuthorizationPaste } from "./oauth.mjs";
+import {
+  callGatewayMethod,
+  loadWriteOAuthCredentials,
+  resolveAgentDir,
+  verifyPrimaryWithStoredCredential,
+} from "./runtime.mjs";
 import { createStateStore } from "./store.mjs";
 import {
   beginOutage,
@@ -24,6 +31,8 @@ type PluginCfg = {
   allowPasteRedirect: boolean;
   telegramChatIds: string[];
   telegramUserIds: string[];
+  agentId: string;
+  oauthOriginator: string;
   verificationPrompt: string;
   verificationExpectedText: string;
 };
@@ -39,6 +48,8 @@ const DEFAULT_CFG: PluginCfg = {
   allowPasteRedirect: true,
   telegramChatIds: [],
   telegramUserIds: [],
+  agentId: "main",
+  oauthOriginator: "openclaw",
   verificationPrompt: "Reply with PRIMARY_REAUTH_OK and nothing else.",
   verificationExpectedText: "PRIMARY_REAUTH_OK",
 };
@@ -76,6 +87,12 @@ function normalizeCfg(raw: unknown): PluginCfg {
       typeof source.allowPasteRedirect === "boolean" ? source.allowPasteRedirect : DEFAULT_CFG.allowPasteRedirect,
     telegramChatIds: list("telegramChatIds"),
     telegramUserIds: list("telegramUserIds"),
+    agentId:
+      typeof source.agentId === "string" && source.agentId.trim() ? source.agentId.trim() : DEFAULT_CFG.agentId,
+    oauthOriginator:
+      typeof source.oauthOriginator === "string" && source.oauthOriginator.trim()
+        ? source.oauthOriginator.trim()
+        : DEFAULT_CFG.oauthOriginator,
     verificationPrompt:
       typeof source.verificationPrompt === "string" && source.verificationPrompt.trim()
         ? source.verificationPrompt.trim()
@@ -107,8 +124,40 @@ const plugin = {
       saveState: (state: any) => {
         store.write(state);
       },
-      createAuthUrl: async (sessionId: string) =>
-        `https://reauth-placeholder.invalid/openai-codex?session=${encodeURIComponent(sessionId)}`,
+      createAuthStart: async () =>
+        createAuthorizationStart({
+          originator: cfg.oauthOriginator,
+        }),
+      completeAuthPaste: async ({ input, expectedState, verifier }: any) => {
+        const writeCredentials = await loadWriteOAuthCredentials();
+        return completeAuthorizationPaste({
+          input,
+          expectedState,
+          verifier,
+          agentDir: resolveAgentDir(cfg.agentId),
+          writeCredentials,
+        });
+      },
+      verifyPrimary: async () =>
+        verifyPrimaryWithStoredCredential({
+          agentDir: resolveAgentDir(cfg.agentId),
+          provider: cfg.provider,
+          modelRef: cfg.primaryModelRef,
+          prompt: cfg.verificationPrompt,
+          expectedText: cfg.verificationExpectedText,
+        }),
+      releaseFallback: async () => {
+        await callGatewayMethod("codex-fallback.release", {
+          reason: "reauth_recovered",
+          source: "codex-telegram-reauth",
+        });
+      },
+      ensureFallbackPinned: async () => {
+        await callGatewayMethod("codex-fallback.pin", {
+          reason: "auth-outage",
+          source: "codex-telegram-reauth",
+        });
+      },
     });
 
     api.registerGatewayMethod("codex-reauth.status", ({ respond }: any) => {
@@ -215,6 +264,14 @@ const plugin = {
       acceptsArgs: false,
       requireAuth: true,
       handler: (ctx) => commandHandlers.reauthCancel(ctx),
+    });
+
+    api.registerCommand({
+      name: "reauth_paste",
+      description: "Complete Codex SSO re-auth from a pasted redirect URL.",
+      acceptsArgs: true,
+      requireAuth: true,
+      handler: (ctx) => commandHandlers.reauthPaste(ctx),
     });
 
     api.registerCli(({ program }) => {
