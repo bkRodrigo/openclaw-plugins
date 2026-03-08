@@ -7,9 +7,6 @@ function normalizeList(values) {
 }
 
 function isAllowed(ctx, cfg) {
-  if (ctx.isAuthorizedSender === false) {
-    return false;
-  }
   const allowedChats = normalizeList(cfg.telegramChatIds);
   const allowedUsers = normalizeList(cfg.telegramUserIds);
   if (allowedChats.length === 0 && allowedUsers.length === 0) {

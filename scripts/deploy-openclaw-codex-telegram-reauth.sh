@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_ID="codex-telegram-reauth"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${OPENCLAW_PLUGIN_ENV_FILE:-${REPO_ROOT}/.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
+PLUGIN_HOST_USER="${PLUGIN_HOST_USER:-$(id -un)}"
+PLUGIN_HOME="${PLUGIN_HOME:-/home/${PLUGIN_HOST_USER}}"
+
+SRC_DIR="${REPO_ROOT}/${PLUGIN_ID}"
+
+OPENCLAW_BIN_DEFAULT="$(command -v openclaw || true)"
+OPENCLAW_ROOT_DEFAULT=""
+if [[ -n "${OPENCLAW_BIN_DEFAULT}" ]]; then
+  OPENCLAW_ROOT_DEFAULT="$(cd "$(dirname "${OPENCLAW_BIN_DEFAULT}")/../lib/node_modules/openclaw" && pwd)"
+fi
+OPENCLAW_ROOT="${OPENCLAW_ROOT:-${OPENCLAW_ROOT_DEFAULT}}"
+DEST_DIR="${OPENCLAW_ROOT}/extensions/${PLUGIN_ID}"
+
+OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${PLUGIN_HOME}/.openclaw/openclaw.json}"
+
+DO_PREVIEW=0
+DO_APPLY=0
+DO_RESTART=0
+
+usage() {
+  cat <<USAGE
+Usage:
+  ${0} --preview
+  ${0} --apply [--restart]
+USAGE
+}
+
+fail() {
+  printf '[deploy-codex-telegram-reauth][FAIL] %s\n' "$1" >&2
+  exit 1
+}
+
+hash_file() {
+  local f="$1"
+  if [[ -f "$f" ]]; then
+    sha256sum "$f" | awk '{print $1}'
+  else
+    printf 'MISSING\n'
+  fi
+}
+
+list_plugin_files() {
+  local dir="$1"
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort
+}
+
+hash_tree() {
+  local dir="$1"
+  if [[ ! -d "$dir" ]]; then
+    printf 'MISSING\n'
+    return
+  fi
+  local files
+  files="$(list_plugin_files "$dir")"
+  if [[ -z "$files" ]]; then
+    printf 'EMPTY\n'
+    return
+  fi
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf '%s %s\n' "$rel" "$(hash_file "$dir/$rel")"
+  done <<< "$files" | sha256sum | awk '{print $1}'
+}
+
+config_enabled_state() {
+  if [[ ! -f "${OPENCLAW_CONFIG}" ]]; then
+    printf 'config_file_missing\n'
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'jq_missing\n'
+    return
+  fi
+
+  local enabled
+  enabled="$(jq -r --arg id "${PLUGIN_ID}" '.plugins.entries[$id].enabled // "unset"' "${OPENCLAW_CONFIG}" 2>/dev/null || printf 'parse_error')"
+  printf '%s\n' "${enabled}"
+}
+
+print_state() {
+  local src_tree_hash
+  local dst_tree_hash
+  local cfg_state
+
+  src_tree_hash="$(hash_tree "${SRC_DIR}")"
+  dst_tree_hash="$(hash_tree "${DEST_DIR}")"
+  cfg_state="$(config_enabled_state)"
+
+  printf 'plugin_id=%s\n' "${PLUGIN_ID}"
+  printf 'source=%s\n' "${SRC_DIR}"
+  printf 'destination=%s\n' "${DEST_DIR}"
+  printf 'source_tree_sha256=%s\n' "${src_tree_hash}"
+  printf 'dest_tree_sha256=%s\n' "${dst_tree_hash}"
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf 'source_%s_sha256=%s\n' "${rel//[^A-Za-z0-9]/_}" "$(hash_file "${SRC_DIR}/${rel}")"
+    printf 'dest_%s_sha256=%s\n' "${rel//[^A-Za-z0-9]/_}" "$(hash_file "${DEST_DIR}/${rel}")"
+  done < <(list_plugin_files "${SRC_DIR}")
+  printf 'config_enabled=%s\n' "${cfg_state}"
+
+  if [[ "${src_tree_hash}" == "${dst_tree_hash}" ]]; then
+    printf 'status=in-sync\n'
+  else
+    printf 'status=drift-or-missing\n'
+  fi
+
+  if [[ "${cfg_state}" != "true" ]]; then
+    printf 'warning=plugin_not_enabled_in_config\n'
+  fi
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --help)
+      usage
+      exit 0
+      ;;
+    --preview)
+      DO_PREVIEW=1
+      shift
+      ;;
+    --apply)
+      DO_APPLY=1
+      shift
+      ;;
+    --restart)
+      DO_RESTART=1
+      shift
+      ;;
+    *)
+      usage
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ "${DO_PREVIEW}" -eq 0 && "${DO_APPLY}" -eq 0 ]]; then
+  usage
+  fail "choose --preview or --apply"
+fi
+
+[[ -f "${SRC_DIR}/index.ts" ]] || fail "source file not found: ${SRC_DIR}/index.ts"
+[[ -f "${SRC_DIR}/openclaw.plugin.json" ]] || fail "source file not found: ${SRC_DIR}/openclaw.plugin.json"
+[[ -n "${OPENCLAW_ROOT}" ]] || fail "could not resolve OpenClaw install root from openclaw binary"
+[[ -d "${OPENCLAW_ROOT}" ]] || fail "OpenClaw install root not found: ${OPENCLAW_ROOT}"
+
+if [[ "${DO_PREVIEW}" -eq 1 ]]; then
+  print_state
+  if [[ "${DO_APPLY}" -eq 0 ]]; then
+    exit 0
+  fi
+fi
+
+mkdir -p "${DEST_DIR}"
+declare -A src_files=()
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  src_files["$rel"]=1
+  install -m 0644 "${SRC_DIR}/${rel}" "${DEST_DIR}/${rel}"
+done < <(list_plugin_files "${SRC_DIR}")
+
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  if [[ -z "${src_files[$rel]+x}" ]]; then
+    rm -f "${DEST_DIR}/${rel}"
+  fi
+done < <(list_plugin_files "${DEST_DIR}")
+
+print_state
+
+if [[ "${DO_RESTART}" -eq 1 ]]; then
+  uid="$(id -u)"
+  export XDG_RUNTIME_DIR="/run/user/${uid}"
+  systemctl --user restart openclaw-gateway.service
+  printf 'gateway_restart=ok\n'
+fi
+
+printf 'deploy=ok\n'
