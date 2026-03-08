@@ -16,8 +16,6 @@ PLUGIN_HOST_USER="${PLUGIN_HOST_USER:-$(id -un)}"
 PLUGIN_HOME="${PLUGIN_HOME:-/home/${PLUGIN_HOST_USER}}"
 
 SRC_DIR="${REPO_ROOT}/${PLUGIN_ID}"
-SRC_INDEX="${SRC_DIR}/index.ts"
-SRC_MANIFEST="${SRC_DIR}/openclaw.plugin.json"
 
 OPENCLAW_BIN_DEFAULT="$(command -v openclaw || true)"
 OPENCLAW_ROOT_DEFAULT=""
@@ -26,8 +24,6 @@ if [[ -n "${OPENCLAW_BIN_DEFAULT}" ]]; then
 fi
 OPENCLAW_ROOT="${OPENCLAW_ROOT:-${OPENCLAW_ROOT_DEFAULT}}"
 DEST_DIR="${OPENCLAW_ROOT}/extensions/${PLUGIN_ID}"
-DEST_INDEX="${DEST_DIR}/index.ts"
-DEST_MANIFEST="${DEST_DIR}/openclaw.plugin.json"
 
 # Read-only signal so operators can catch missing config while avoiding ACL churn.
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${PLUGIN_HOME}/.openclaw/openclaw.json}"
@@ -66,6 +62,29 @@ hash_file() {
   fi
 }
 
+list_plugin_files() {
+  local dir="$1"
+  find "$dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort
+}
+
+hash_tree() {
+  local dir="$1"
+  if [[ ! -d "$dir" ]]; then
+    printf 'MISSING\n'
+    return
+  fi
+  local files
+  files="$(list_plugin_files "$dir")"
+  if [[ -z "$files" ]]; then
+    printf 'EMPTY\n'
+    return
+  fi
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf '%s %s\n' "$rel" "$(hash_file "$dir/$rel")"
+  done <<< "$files" | sha256sum | awk '{print $1}'
+}
+
 config_enabled_state() {
   if [[ ! -f "${OPENCLAW_CONFIG}" ]]; then
     printf 'config_file_missing\n'
@@ -82,28 +101,27 @@ config_enabled_state() {
 }
 
 print_state() {
-  local src_index_hash
-  local src_manifest_hash
-  local dst_index_hash
-  local dst_manifest_hash
+  local src_tree_hash
+  local dst_tree_hash
   local cfg_state
 
-  src_index_hash="$(hash_file "${SRC_INDEX}")"
-  src_manifest_hash="$(hash_file "${SRC_MANIFEST}")"
-  dst_index_hash="$(hash_file "${DEST_INDEX}")"
-  dst_manifest_hash="$(hash_file "${DEST_MANIFEST}")"
+  src_tree_hash="$(hash_tree "${SRC_DIR}")"
+  dst_tree_hash="$(hash_tree "${DEST_DIR}")"
   cfg_state="$(config_enabled_state)"
 
   printf 'plugin_id=%s\n' "${PLUGIN_ID}"
   printf 'source=%s\n' "${SRC_DIR}"
   printf 'destination=%s\n' "${DEST_DIR}"
-  printf 'source_index_sha256=%s\n' "${src_index_hash}"
-  printf 'dest_index_sha256=%s\n' "${dst_index_hash}"
-  printf 'source_manifest_sha256=%s\n' "${src_manifest_hash}"
-  printf 'dest_manifest_sha256=%s\n' "${dst_manifest_hash}"
+  printf 'source_tree_sha256=%s\n' "${src_tree_hash}"
+  printf 'dest_tree_sha256=%s\n' "${dst_tree_hash}"
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf 'source_%s_sha256=%s\n' "${rel//[^A-Za-z0-9]/_}" "$(hash_file "${SRC_DIR}/${rel}")"
+    printf 'dest_%s_sha256=%s\n' "${rel//[^A-Za-z0-9]/_}" "$(hash_file "${DEST_DIR}/${rel}")"
+  done < <(list_plugin_files "${SRC_DIR}")
   printf 'config_enabled=%s\n' "${cfg_state}"
 
-  if [[ "${src_index_hash}" == "${dst_index_hash}" && "${src_manifest_hash}" == "${dst_manifest_hash}" ]]; then
+  if [[ "${src_tree_hash}" == "${dst_tree_hash}" ]]; then
     printf 'status=in-sync\n'
   else
     printf 'status=drift-or-missing\n'
@@ -144,8 +162,8 @@ if [[ "${DO_PREVIEW}" -eq 0 && "${DO_APPLY}" -eq 0 ]]; then
   fail "choose --preview or --apply"
 fi
 
-[[ -f "${SRC_INDEX}" ]] || fail "source file not found: ${SRC_INDEX}"
-[[ -f "${SRC_MANIFEST}" ]] || fail "source file not found: ${SRC_MANIFEST}"
+[[ -f "${SRC_DIR}/index.ts" ]] || fail "source file not found: ${SRC_DIR}/index.ts"
+[[ -f "${SRC_DIR}/openclaw.plugin.json" ]] || fail "source file not found: ${SRC_DIR}/openclaw.plugin.json"
 [[ -n "${OPENCLAW_ROOT}" ]] || fail "could not resolve OpenClaw install root from openclaw binary"
 [[ -d "${OPENCLAW_ROOT}" ]] || fail "OpenClaw install root not found: ${OPENCLAW_ROOT}"
 
@@ -157,8 +175,19 @@ if [[ "${DO_PREVIEW}" -eq 1 ]]; then
 fi
 
 mkdir -p "${DEST_DIR}"
-install -m 0644 "${SRC_INDEX}" "${DEST_INDEX}"
-install -m 0644 "${SRC_MANIFEST}" "${DEST_MANIFEST}"
+declare -A src_files=()
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  src_files["$rel"]=1
+  install -m 0644 "${SRC_DIR}/${rel}" "${DEST_DIR}/${rel}"
+done < <(list_plugin_files "${SRC_DIR}")
+
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  if [[ -z "${src_files[$rel]+x}" ]]; then
+    rm -f "${DEST_DIR}/${rel}"
+  fi
+done < <(list_plugin_files "${DEST_DIR}")
 
 print_state
 
