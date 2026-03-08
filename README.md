@@ -37,6 +37,7 @@ Set host/runtime values in `.env` (for example `PLUGIN_HOST_USER`, `RUNTIME_USER
 ## Repository Layout
 
 - `codex-openai-fallback/` - plugin source
+- `codex-telegram-reauth/` - plugin source
 - `scripts/` - deployment/test/status scripts
 - `tests/` - local regression coverage for plugin tooling
 - `docs/` - plugin-specific docs

@@ -1,0 +1,29 @@
+{
+  "id": "codex-telegram-reauth",
+  "name": "Codex Telegram Reauth",
+  "description": "Deterministic Telegram operator workflow for recovering openai-codex SSO while API fallback remains active.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "fallbackPluginId": { "type": "string" },
+      "provider": { "type": "string" },
+      "primaryModelRef": { "type": "string" },
+      "sessionTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+      "alertCooldownSeconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
+      "autoStartReauth": { "type": "boolean" },
+      "allowPasteRedirect": { "type": "boolean" },
+      "telegramChatIds": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "telegramUserIds": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "verificationPrompt": { "type": "string" },
+      "verificationExpectedText": { "type": "string" }
+    }
+  }
+}

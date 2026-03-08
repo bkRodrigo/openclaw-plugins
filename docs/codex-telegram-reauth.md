@@ -27,6 +27,11 @@ Completed in `codex-openai-fallback`:
 - preflight auth probing in `before_model_resolve`
 - live Telegram validation that SSO outage now falls back to `openai/gpt-5.3-codex`
 
+Completed in `codex-telegram-reauth` phase 1:
+
+- plugin scaffold and persisted session state are now in place
+- deterministic gateway control surface exists for status, outage start, session start, and session cancel
+
 Still to build in `codex-telegram-reauth`:
 
 - deterministic Telegram operator workflow
@@ -430,12 +435,13 @@ Completed:
 Remaining:
 
 6. scaffold `codex-telegram-reauth`
-7. implement reauth session persistence and Telegram notice/control commands
-8. implement OAuth helper start/completion
-9. implement callback or pasteback completion
-10. implement deterministic primary verification
-11. implement fallback release only on verified success
-12. add docs and live validation for the reauth workflow
+7. implement persisted reauth session state and deterministic gateway control surface
+8. implement Telegram notice/control commands
+9. implement OAuth helper start/completion
+10. implement callback or pasteback completion
+11. implement deterministic primary verification
+12. implement fallback release only on verified success
+13. add docs and live validation for the reauth workflow
 
 ## MVP Decision
 
