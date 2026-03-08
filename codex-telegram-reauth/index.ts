@@ -3,6 +3,7 @@ import path from "path";
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 
+import { createCommandHandlers } from "./commands.mjs";
 import {
   beginOutage,
   buildStatus,
@@ -104,6 +105,16 @@ const plugin = {
       saveState(statePath, state);
     };
 
+    const commandHandlers = createCommandHandlers({
+      cfg,
+      getState: () => state,
+      saveState: () => {
+        persist();
+      },
+      createAuthUrl: async (sessionId: string) =>
+        `https://reauth-placeholder.invalid/openai-codex?session=${encodeURIComponent(sessionId)}`,
+    });
+
     api.registerGatewayMethod("codex-reauth.status", ({ respond }: any) => {
       respond(true, {
         enabled: cfg.enabled,
@@ -173,6 +184,30 @@ const plugin = {
         reason: result.ok ? null : result.reason,
         state: buildStatus(state),
       });
+    });
+
+    api.registerCommand({
+      name: "reauth",
+      description: "Start Codex SSO re-auth recovery.",
+      acceptsArgs: false,
+      requireAuth: true,
+      handler: (ctx) => commandHandlers.reauth(ctx),
+    });
+
+    api.registerCommand({
+      name: "reauth_status",
+      description: "Show Codex SSO re-auth recovery status.",
+      acceptsArgs: false,
+      requireAuth: true,
+      handler: (ctx) => commandHandlers.reauthStatus(ctx),
+    });
+
+    api.registerCommand({
+      name: "reauth_cancel",
+      description: "Cancel the active Codex SSO re-auth session.",
+      acceptsArgs: false,
+      requireAuth: true,
+      handler: (ctx) => commandHandlers.reauthCancel(ctx),
     });
 
     api.registerCli(({ program }) => {
