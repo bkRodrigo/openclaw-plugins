@@ -19,6 +19,16 @@ function normalizeErrorText(error) {
   return typeof error === "string" ? error.trim() : "";
 }
 
+function buildAuthOutageClassification(error) {
+  const normalized = normalizeErrorText(error);
+  return {
+    kind: "auth_outage",
+    reason: AUTH_OUTAGE_PIN_REASON,
+    source: AUTH_OUTAGE_PIN_SOURCE,
+    error: normalized,
+  };
+}
+
 export function isAuthOutageError(error) {
   const message = normalizeErrorText(error);
   if (!message) {
@@ -44,16 +54,43 @@ export function classifyAgentFailure(event) {
   if (!isAuthOutageError(error)) {
     return { kind: "none" };
   }
-  return {
-    kind: "auth_outage",
-    reason: AUTH_OUTAGE_PIN_REASON,
-    source: AUTH_OUTAGE_PIN_SOURCE,
-    error,
-  };
+  return buildAuthOutageClassification(error);
+}
+
+export function classifyMessageSendingEvent(event) {
+  const content = normalizeErrorText(event?.content);
+  if (!content) {
+    return { kind: "none" };
+  }
+  const marker = "Agent failed before reply:";
+  const markerIndex = content.indexOf(marker);
+  if (markerIndex === -1) {
+    return { kind: "none" };
+  }
+  const failureText = content.slice(markerIndex + marker.length).split("\n", 1)[0]?.trim() ?? "";
+  if (!failureText || !isAuthOutageError(failureText)) {
+    return { kind: "none" };
+  }
+  return buildAuthOutageClassification(failureText);
 }
 
 export function applyAgentFailureToCircuit(state, event, now = Date.now()) {
   const classified = classifyAgentFailure(event);
+  if (classified.kind !== "auth_outage") {
+    return null;
+  }
+  const wasPinned = state.pinned === true;
+  pinFallback(state, classified.reason, classified.source);
+  state.lastAuthOutageAtMs = now;
+  state.lastAuthOutageError = classified.error;
+  return {
+    ...classified,
+    wasPinned,
+  };
+}
+
+export function applyMessageSendingEventToCircuit(state, event, now = Date.now()) {
+  const classified = classifyMessageSendingEvent(event);
   if (classified.kind !== "auth_outage") {
     return null;
   }

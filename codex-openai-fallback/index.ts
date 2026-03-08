@@ -11,7 +11,7 @@ import {
   releasePinnedFallback,
   remainingSeconds,
 } from "./core.mjs";
-import { applyAgentFailureToCircuit } from "./auth-outage.mjs";
+import { applyAgentFailureToCircuit, applyMessageSendingEventToCircuit } from "./auth-outage.mjs";
 
 type PluginCfg = {
   enabled: boolean;
@@ -443,6 +443,29 @@ const fallbackPlugin = {
       } else {
         api.logger.warn(
           `codex-openai-fallback: fallback entered (source=throttle, remaining_s=${remainingSeconds(state, now)})`
+        );
+      }
+    });
+
+    api.on("message_sending", (event, ctx) => {
+      if (!cfg.enabled || !cfg.authOutagePinEnabled) {
+        return;
+      }
+      if (ctx.channelId !== "telegram") {
+        return;
+      }
+      const now = Date.now();
+      const authOutage = applyMessageSendingEventToCircuit(state, event, now);
+      if (!authOutage) {
+        return;
+      }
+      if (authOutage.wasPinned) {
+        api.logger.warn(
+          `codex-openai-fallback: auth outage reply observed while fallback already pinned (channel=${ctx.channelId}, source=${state.pinSource}, reason=${state.pinReason})`
+        );
+      } else {
+        api.logger.error(
+          `codex-openai-fallback: auth outage reply observed; fallback pinned (channel=${ctx.channelId}, source=${state.pinSource}, reason=${state.pinReason})`
         );
       }
     });

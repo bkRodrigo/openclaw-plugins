@@ -21,6 +21,7 @@ Provide a fallback path from a primary Codex provider/model to an OpenAI API pro
 - Watches for targeted `openai-codex` OAuth refresh/auth failures.
 - Activates fallback window (`cooldownSeconds`) after qualifying throttle failures.
 - Pins fallback automatically for qualifying auth-refresh outages.
+- Pins fallback automatically when Telegram emits the user-facing auth failure reply for the same outage class.
 - Supports pinned fallback state for operator-controlled outage windows.
 - Overrides provider/model while fallback window is active.
 - Exposes control/status methods:
@@ -122,6 +123,7 @@ Coverage includes:
 
 - core fallback state semantics for cooldown vs pin behavior
 - auth-outage detection and auto-pin behavior for targeted `openai-codex` refresh failures
+- Telegram user-facing auth failure reply detection as a second trigger for auto-pin
 - lower-level gateway RPC helper resolution and invocation
 - deterministic drill/status helpers using the gateway helper instead of `openclaw gateway call`
 - explicit regression guard that fails if the shell scripts fall back to the broken CLI wrapper path
@@ -133,6 +135,7 @@ Plugin logs include explicit fallback transition markers:
 - fallback entered (`source=manual-arm`, `source=cli-arm`, or `source=throttle`)
 - fallback pinned (`source=<pin-source>`)
 - auth outage detected and fallback pinned (`source=auth-refresh`, `reason=auth-outage`)
+- auth outage reply observed and fallback pinned on Telegram delivery path
 - fallback window refreshed (`source=throttle`)
 - fallback request routed (provider/model + remaining seconds)
 - fallback exited (`source=manual-disarm`, `source=cli-disarm`, `source=cooldown-expired`)
